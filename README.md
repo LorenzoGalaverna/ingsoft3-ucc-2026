@@ -103,8 +103,12 @@ npm run dev                # http://localhost:5173 (proxea /api al backend)
 
 ## Tags relevantes
 
-- `tp1`, `v1.0.0` — cierre del TP1 (Git colaborativo).
-- `tp2` — cierre del TP2 (contenerización).
+Convención unificada de la cátedra (aviso del 25/8/2026): cada práctico se cierra con `vN.0.0` + release. Los tags `tpN` de la política vieja (§3 del reglamento) quedan por continuidad — un commit puede tener varios tags.
+
+- `tp1` / `v1.0.0` — cierre del **TP1** (Git colaborativo).
+- `tp2` / `v2.0.0` — cierre del **TP2** (contenedores). *(Legacy: `v1.1.0` apunta al mismo commit.)*
+- `tp3` / `v3.0.0` — cierre del **TP3** (planificación DevOps + [Project público](https://github.com/users/LorenzoGalaverna/projects/1)). *(Legacy: `v1.2.0` apunta al mismo commit.)*
+- `v4.0.0` — cierre del **TP4** (CI Pipelines as Code).
 
 ## Uso de IA
 
