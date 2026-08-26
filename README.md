@@ -107,3 +107,4 @@ npm run dev                # http://localhost:5173 (proxea /api al backend)
 ## Uso de IA
 
 Ver `decisiones.md` — se declaran, por TP, qué partes fueron asistidas por IA y cómo se verificaron.
+
