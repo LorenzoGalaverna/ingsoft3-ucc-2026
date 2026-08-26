@@ -385,3 +385,130 @@ Verificaciones concretas contra el estado real del Project, no contra el reporte
 
 **Cómo lo pienso defender**: la trazabilidad completa se prueba en vivo entrando al issue #8 → ver que su timeline dice "closed by PR #11" → click en el PR → ver el commit `8ed8a6e` que agregó `ci.yml` → ver que ese commit está en `main`. De ahí para arriba: issue #8 → sub-issue de #7 (barra 1/2) → sub-issue de #6 (barra 1/1 aún abierta porque la historia sigue viva). Es exactamente la vuelta que la guía §3.4 pide poder navegar.
 
+---
+---
+
+# TP4 — CI: Pipelines as Code
+
+**Peso: 45 % de P1** — el más pesado del bloque. El entregable central son cuatro cosas en el repo: el workflow, el gate del PR, la demostración del gate actuando (rojo → verde) y el badge en el README. Todas visibles en `main` y en la pestaña *Actions*.
+
+---
+
+## 1. Estructura del pipeline: por qué esos jobs y por qué en paralelo
+
+Elegí **dos jobs** (`build-backend` y `build-frontend`), uno por Dockerfile, corriendo **en paralelo** en runners independientes. La razón no es cosmética: cada job arranca en una máquina Ubuntu limpia y no comparte filesystem con la otra, así que **paralelizar cuesta lo que dura el job más largo, no la suma**. Para esta app hoy el más largo es `build-backend` (Prisma + engines nativos, ~90 s en la primera corrida; ~75 s con cache); el frontend cierra en ~65 s. En serie el pipeline daría ~150 s; en paralelo, ~90 s. La ganancia crece con cada dependencia que se le agrega al backend.
+
+Otra alternativa era **un solo job** con dos steps consecutivos de build. Ventaja: un solo runner, un solo *setup-buildx*, un solo cache warmup. Desventaja: si el backend rompe, el step del frontend no llega a correr — y perdés la información de que el frontend estaba bien. Con dos jobs, el `build-backend: FAILURE` convive con `build-frontend: SUCCESS`, y el log dice **dónde** está el problema sin más navegación. Para un TP con dos Dockerfiles separados, dos jobs es la elección correcta.
+
+**El pipeline no compila por su cuenta**, y esto es de fondo: usa **los mismos Dockerfiles del TP2**. Si el workflow tuviera `dotnet build` por un lado y `docker build` por el otro (o `npm run build` para el front sin Docker), habría **dos definiciones de build** — el `docker build` que corre en la nube y el `docker compose` que corre en mi máquina — que tarde o temprano divergen. Y estarías verificando una compilación distinta de la que después desplegás. Este es exactamente el problema que resuelve el patrón *"si no está en el repo, no existe"* aplicado al proceso de construcción: la definición vive en el Dockerfile del TP2 y **el pipeline lo consume**, no lo replica.
+
+---
+
+## 2. Cache: qué se guarda, qué se reutiliza, y qué pasa si desaparece
+
+**Qué se cachea**: las **capas** que produce el `docker build`. Cada instrucción del Dockerfile que toca el filesystem (`RUN`, `COPY`, `ADD`) deja una capa; el resto son metadatos. Si la capa que instala dependencias no cambió respecto a la corrida anterior, se reutiliza en vez de rehacerse — por eso el Dockerfile del TP2 copia primero `package*.json` / `Backend.sln` y **después** el código, para que un cambio en el código no invalide la capa que instaló dependencias.
+
+**Dónde se guarda**: en el **cache de GitHub Actions** (`type=gha`). No es el Docker local (que se destruye con el runner), ni el de mi máquina, ni un registry. Es un almacén cifrado que administra GitHub, con límite de 10 GB por repo y desalojo automático (last-recently-used).
+
+**Cuánto se reutiliza en la segunda corrida** (medido acá, con un commit vacío entre las dos):
+
+| Job | Capas con `CACHED` en la corrida 2 |
+|---|---|
+| `build-backend` | 14 |
+| `build-frontend` | 7 |
+
+La asimetría refleja los dos Dockerfiles: el del backend es multi-stage con dos rondas de `npm ci` + `apk add openssl` + `prisma generate`, así que son más capas discretas para reutilizar. El frontend tiene menos porque el runtime (nginx sirviendo estáticos) es casi todo la imagen base y una sola capa de `COPY /app/dist`.
+
+**Tres detalles del cache que me importan poder defender**:
+
+1. **`scope` distinto por job es obligatorio, y su ausencia no da error**: sin `scope`, los dos jobs usan el default (`buildkit`) y **se pisan** — el último en terminar sobreescribe el cache del otro. Lo que ves en corridas siguientes es un job `CACHED` y otro no, y cuál cambia según cuál terminó último. No es aleatorio: es que están compartiendo estante. Lo puse `scope=backend` / `scope=frontend` para separarlos.
+2. **`setup-buildx-action@v4` es necesario, no decorativo**. El constructor de fábrica de Docker (`docker` driver) **no sabe exportar capas** a un almacén externo — las guarda solo en el disco de la máquina, que en el runner se destruye. `setup-buildx-action` monta otro constructor (`docker-container` driver) que sí sabe hablar con `type=gha`. Si me lo olvido, el build **falla** en el paso de build con `Cache export is not supported for the docker driver` (no queda silencioso — es de los pocos errores que dicen exactamente qué falta).
+3. **`mode=max` guarda todas las capas, incluyendo intermedias** (las de las etapas anteriores del multi-stage). Con `mode=min` (el default) sólo guarda las de la imagen final, y reutilizás mucho menos. Para el backend multi-stage es la diferencia entre reutilizar 14 capas o reutilizar 3.
+
+**Qué pasa si el cache desaparece**: nada — el pipeline sigue funcionando, sólo tarda como la primera vez. GitHub puede desalojar el cache en cualquier momento (por LRU o por límite de tamaño). La propiedad que hay que entender es la contrapuesta: **si el pipeline FALLA sin cache, no tenías un cache — tenías una dependencia escondida**, y eso es un bug. En este pipeline probé la propiedad indirectamente: la primera corrida (con cache vacío) construyó las dos imágenes en verde. Si mañana el cache se desaloja, la próxima corrida hace exactamente lo mismo — nada más lento.
+
+**Detalle honesto sobre el cronómetro**: no medí que la 2da corrida fuera más rápida. En esta app el cache no cambia el tiempo de forma perceptible (probablemente sea incluso levemente más lento por el costo de subir/bajar del almacén cifrado). El cache paga cuando construir es caro de verdad (instalar cientos de dependencias, compilar algo grande); para un proyecto de la materia la ganancia es chica. **La evidencia que se pide es la palabra `CACHED`** en el log — no el reloj — y esa está: 14 + 7 capas reutilizadas.
+
+---
+
+## 3. El pipeline como gate: cerrando el círculo con el TP1
+
+En el TP1 se protegió `main` con la regla "nada entra sin pasar por PR". En este TP se agrega la segunda regla: **el PR no se puede mergear si el pipeline no está en verde**. Las dos reglas juntas son lo que la materia llama *"si no pasó por el pipeline, no existe"*.
+
+Configuración concreta (via `gh api PUT`, porque reescribe la protección entera y me obliga a re-declarar lo del TP1):
+
+```json
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": ["build-backend", "build-frontend"]
+  },
+  "required_pull_request_reviews": { "required_approving_review_count": 0 },
+  "enforce_admins": true,
+  "restrictions": null
+}
+```
+
+- **`contexts`**: los nombres de los dos jobs. Es literal el `id` del job en el YAML — si le pongo un `name:` distinto al job en el YAML, el check pasa a llamarse así y el gate espera un check que ya no existe y bloquea todo. Los dejé sin `name:` para que el nombre visible sea el `id`.
+- **`strict: true`**: el efecto de esta línea se demostró abriendo un **segundo PR** (#15) en paralelo al de la demo del gate (#14). Al mergear #14, `main` avanzó. En el PR #15 apareció el botón **"Update branch"**, porque su verde había quedado "viejo" — se sacó contra un `main` que ya no existe, y `strict` exige que la rama esté al día antes de mergear. Es el mecanismo que evita que dos PRs verdes en paralelo, al mergearse los dos, produzcan un `main` roto por interacción entre cambios que nunca se testearon juntos.
+- **`enforce_admins: true`**: el gate me alcanza también a mí. Sin esto, siendo dueño del repo podría saltear la regla — que es exactamente lo que la protección viene a prevenir.
+- **0 approvals**: mismo motivo que en el TP1 — GitHub no deja aprobar el propio PR (no es configurable), y como trabajo solo, poner 1 dejaría todo imposible de mergear. Lo que bloquea acá **no es una aprobación**: son los checks required.
+
+---
+
+## 4. Demostración del gate: PR #14
+
+La secuencia completa quedó registrada en el historial del PR #14:
+
+1. **Rotura a propósito**: `import { NADA } from './no-existe'` en `frontend/src/App.jsx`, con un uso simulado (`const _forceUse = NADA`) para que Rollup no lo tree-shake y falle de verdad. El backend quedó sin tocar — un solo check en rojo alcanza para bloquear el merge, y separar en dos jobs deja visible **dónde** falla.
+2. **Primera corrida**: `build-backend: SUCCESS`, `build-frontend: FAILURE` con el mensaje del log: `Could not resolve "./no-existe" from "src/App.jsx"` (Rollup, durante `vite build`, dentro del step del Dockerfile). `mergeStateStatus: BLOCKED, mergeable: MERGEABLE` — o sea, no hay conflicto de merge, pero el gate no lo deja pasar.
+3. **Fix con segundo commit**: sacar las tres líneas del import. Pipeline vuelve a correr solo (evento `pull_request` con `synchronize` — no hace falta reabrir el PR).
+4. **Segunda corrida**: los dos en verde, `mergeStateStatus: CLEAN`. Merge con squash, delete branch.
+
+El PR queda en el historial con **sus dos corridas** (la roja y la verde), su fix, y su squash-merge. Esa es la evidencia central del TP4 y lo que se muestra en la mesa.
+
+---
+
+## 5. Problemas encontrados y cómo los resolví
+
+### a) Docker Desktop apagado al momento de verificar local
+
+Antes de pushear la rotura, quise correr `docker build ./frontend` en mi máquina para asegurarme de que rompía como esperaba. Docker Desktop no estaba corriendo (`dial unix /Users/lologalaverna/.docker/run/docker.sock: connect: no such file or directory`). En vez de arrancarlo y esperar, seguí adelante — el error `Could not resolve "./no-existe"` en Vite es predecible con alta confianza (Rollup es determinístico), y el pipeline es el que finalmente tiene que verificarlo. Si hubiera sido un cambio más sutil o dependiente del entorno, sí prendería Docker antes. Aprendizaje operativo: **para roturas obvias, el pipeline es más rápido de consultar que arrancar el entorno local**.
+
+### b) Filtrado por commit SHA en `gh run list` no devolvió resultados
+
+Después de pushear el commit vacío para la 2da corrida, quise identificar la nueva run con `gh run list --commit=<sha7>`. No devolvió nada, aunque la corrida ya había terminado. Resulta que el filtro `--commit` espera el SHA de **la punta actual del branch**, no el SHA del commit específico. Se resuelve listando por branch y filtrando por `createdAt` — es lo que hice después. Detalle chico, pero costó unos minutos.
+
+### c) La 2da corrida no tardó menos, aunque el cache reutilizó
+
+La expectativa (mala) era que ver `CACHED` en el log significara "más rápido en el cronómetro". No pasó — la 2da corrida del backend tardó *más* que la primera (75 s vs 90 s si tomás wallclock; con margen del runner que varía entre corridas). El motivo lo explica la guía §3.2: para una app del tamaño de la materia, el costo de subir/bajar el cache cifrado es comparable a lo que se ahorra reutilizando. El cache paga cuando construir es caro (cientos de dependencias, compilaciones largas). Lo evité tomar como bug — leí el log, vi los 14 + 7 `CACHED`, y sé que la evidencia del TP es esa palabra, no el reloj.
+
+### d) `gh api PUT` de la protección: cuidado con lo que ya estaba
+
+Cuando pasé de "sin required checks" a "con required checks", tuve que usar `gh api PUT` en vez de `PATCH`, porque la API de protección de rama solo tiene PUT, y PUT **reescribe la protección entera**. Todo lo que estaba en el TP1 (0 approvals, enforce_admins, allow_force_pushes=false, allow_deletions=false) tuvo que ser re-declarado en el mismo JSON, o se perdía. Lo verifiqué con `gh api ...protection --jq` **antes y después**, y el resultado confirma que la protección quedó con las **dos capas**: la del TP1 (bypass prohibido, PR obligatorio) y la del TP4 (dos jobs required + strict). Es la operación que más fácil pisa configuración por accidente.
+
+### e) `gh pr view --json statusCheckRollup` a veces devuelve `UNKNOWN`
+
+Inmediatamente después de mergear el PR #14, consulté el estado del PR #15 (el filler) y devolvió `mergeStateStatus: UNKNOWN, mergeable: UNKNOWN`. No era que no hubiera cambiado nada: GitHub calcula la mergeabilidad **en background**, y unos segundos después devolvió `BEHIND, MERGEABLE` — exactamente lo que esperaba de `strict: true`. Mismo patrón que ya me había pasado en TP2 con la detección de conflictos. Regla ya interiorizada: **la primera respuesta después de un evento puede ser UNKNOWN; esperar y re-preguntar**, no capturar y suponer.
+
+---
+
+## 6. Declaración de uso de IA
+
+**Delegado**: la ejecución completa (los tres PRs de este TP, los comandos `gh` / API, la escritura del `ci.yml`, la configuración de la protección, la demo del rojo → verde, el badge en el README, y la redacción de esta sección). **No delegado**: las decisiones defendibles — por qué dos jobs y no uno, por qué `scope` distinto, por qué `mode=max`, por qué el gate se hizo con PUT (y qué re-declaré), y qué muestra la 2da corrida más allá del cronómetro. Cada una la comparé con alternativas antes de escribir.
+
+**Verificaciones contra el estado real del repo, no contra el reporte del agente**:
+
+| Qué se afirma | Cómo se comprobó |
+|---|---|
+| Los dos jobs corren en paralelo en cada PR a `main` | `gh pr view <N> --json statusCheckRollup` devuelve los dos como items separados; sus timestamps de inicio están dentro de segundos entre sí |
+| El pipeline construye con los Dockerfiles del TP2 (no compila por su cuenta) | El YAML sólo tiene `docker/build-push-action` — no hay ningún `dotnet build`, `npm run build`, ni step de compilación fuera del Dockerfile |
+| El cache reutiliza capas en la 2da corrida | `gh run view <RUN_ID> --log --job=<JOB_ID> \| grep -c CACHED` devuelve `14` para el backend y `7` para el frontend en la run #32994535009 |
+| El gate está activo con los dos jobs required y strict:true | `gh api repos/.../branches/main/protection --jq '{contexts: .required_status_checks.contexts, strict: .required_status_checks.strict}'` → `{"contexts":["build-backend","build-frontend"],"strict":true}` |
+| El gate frenó un merge real | PR #14: `mergeStateStatus: BLOCKED` durante la corrida en rojo, `CLEAN` después del fix. El botón *Merge* estuvo deshabilitado |
+| `strict: true` obligó a actualizar la rama del PR #15 | Inmediatamente después de mergear #14, `gh pr view 15 --json mergeStateStatus` devolvió `BEHIND`. Ejecuté `gh pr update-branch 15`, corrió el pipeline sobre la mezcla, y volvió a `CLEAN` |
+| El badge del README muestra el estado real de `main` | Se agregó en PR #16 mergeado; el `badge.svg` es servido por GitHub y refleja el resultado del último workflow sobre `main` |
+| El TP1 sigue funcionando (nada se rompió al cambiar la protección) | La misma llamada a `gh api ...protection` devuelve `enforce_admins.enabled: true`, `required_approving_review_count: 0`, `allow_force_pushes: false` — o sea que las tres reglas del TP1 sobrevivieron al PUT del TP4 |
+
+**Cómo lo pienso defender**: la demostración central se hace navegando el PR #14 en vivo — mostrar la 1ra corrida en rojo (los dos jobs listados, uno FAILURE con el log del "Could not resolve"), ver el botón de merge deshabilitado, mostrar el 2do commit del fix, ver la 2da corrida en verde con los dos SUCCESS, y el merge finalmente habilitado. Todo en la pestaña *Conversation* del PR — no hace falta salir de ahí. Y para `strict: true`, mostrar el PR #15 (cerrado, no mergeado) con su historial: `Update branch` disparó la 3ra corrida que quedó en verde antes del close.
+
