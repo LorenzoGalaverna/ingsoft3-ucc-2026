@@ -1,5 +1,7 @@
 # Habit Tracker — INGSW3 UCC 2026
 
+[![CI](https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/actions/workflows/ci.yml/badge.svg)](https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/actions/workflows/ci.yml)
+
 App del semestre de **Ingeniería del Software 3** (UCC, cátedra Ing. Ariel Schwindt). Tracker de hábitos con mecánica de RPG: cada hábito da XP al completarlo, se sube de nivel cada 100 XP, y un mismo hábito solo puede completarse una vez por día.
 
 **Stack**: backend **Node 22 + Express + Prisma** · frontend **React + Vite** · base **PostgreSQL 16**.
