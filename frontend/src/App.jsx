@@ -1,11 +1,6 @@
 import { useEffect, useState } from 'react';
-// TP4 demo: import a un archivo que no existe — Vite lo resuelve durante el build
-// y el pipeline debe fallar acá, bloqueando el merge.
-import { NADA } from './no-existe';
 
 const XP_PER_LEVEL = 100;
-// eslint-disable-next-line no-unused-vars
-const _forceUse = NADA;
 
 export default function App() {
   const [user, setUser] = useState(null);
