@@ -1,6 +1,9 @@
 import express from 'express';
 import cors from 'cors';
 import { PrismaClient } from '@prisma/client';
+import { calcularNivel, XP_PER_LEVEL } from './domain/leveling.js';
+import { dayKey } from './domain/dayKey.js';
+import { validarNombreHabito, normalizarXpReward } from './domain/validators.js';
 
 const prisma = new PrismaClient();
 const app = express();
@@ -8,10 +11,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const XP_PER_LEVEL = 100;
 const USER_ID = 1; // walking skeleton: usuario único hardcodeado
-
-const dayKey = (d = new Date()) => d.toISOString().slice(0, 10);
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
@@ -37,12 +37,12 @@ app.get('/api/habits', async (_req, res) => {
 
 app.post('/api/habits', async (req, res) => {
   const { name, xpReward } = req.body ?? {};
-  if (!name || typeof name !== 'string' || !name.trim()) {
-    return res.status(400).json({ error: 'name es obligatorio' });
+  const nombre = validarNombreHabito(name);
+  if (!nombre.ok) {
+    return res.status(400).json({ error: nombre.error });
   }
-  const reward = Number.isFinite(xpReward) && xpReward > 0 ? Math.floor(xpReward) : 10;
   const habit = await prisma.habit.create({
-    data: { name: name.trim(), xpReward: reward, userId: USER_ID },
+    data: { name: nombre.value, xpReward: normalizarXpReward(xpReward), userId: USER_ID },
   });
   res.status(201).json(habit);
 });
@@ -73,11 +73,10 @@ app.post('/api/habits/:id/complete', async (req, res) => {
         where: { id: USER_ID },
         data: { xp: { increment: habit.xpReward } },
       });
-      // Level up: cada 100 XP subís de nivel. Se recalcula en base al total,
-      // así que el nivel siempre es consistente con la XP (no se puede desfasar).
-      const newLevel = Math.floor(updated.xp / XP_PER_LEVEL) + 1;
-      if (newLevel !== updated.level) {
-        return tx.user.update({ where: { id: USER_ID }, data: { level: newLevel } });
+      // El nivel se recalcula desde la XP total — imposible que se desfase.
+      const nuevoNivel = calcularNivel(updated.xp);
+      if (nuevoNivel !== updated.level) {
+        return tx.user.update({ where: { id: USER_ID }, data: { level: nuevoNivel } });
       }
       return updated;
     });
@@ -90,5 +89,10 @@ app.post('/api/habits/:id/complete', async (req, res) => {
   }
 });
 
-const port = Number(process.env.PORT || 8080);
-app.listen(port, () => console.log(`habit-tracker backend escuchando en :${port}`));
+// Solo escuchamos si el módulo se ejecuta directo (no cuando lo importa un test).
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const port = Number(process.env.PORT || 8080);
+  app.listen(port, () => console.log(`habit-tracker backend escuchando en :${port}`));
+}
+
+export { app, XP_PER_LEVEL };
