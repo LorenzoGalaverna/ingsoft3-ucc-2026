@@ -223,3 +223,54 @@ jobs:
             sleep 20
           done
           echo "❌ QA no respondió a tiempo"; exit 1
+
+  # ────────────────────────────────────────────────────────────────────────
+  # TP6 §3.4 — Deploy a PROD detrás del gate humano
+  # needs: deploy-qa → PROD solo después de que QA quedó verde.
+  # environment: production → el workflow SE PAUSA acá hasta que el
+  # required reviewer (yo mismo) apruebe. Si el reviewer rechaza, el job
+  # queda como failure y a PROD no sube nada.
+  # No repito el `if: main only` — la cadena por needs ya lo garantiza:
+  # deploy-qa tiene el if, y deploy-prod depende de él.
+  # concurrency: si mientras uno espera aprobación llega otro merge, evita
+  # que 2 deploys a prod se pisen. Ojo con la trampa documentada de §3.4:
+  # aprobar una corrida vieja después de una nueva puede hacer retroceder
+  # PROD — se maneja rechazando la vieja a mano.
+  # ────────────────────────────────────────────────────────────────────────
+  deploy-prod:
+    runs-on: ubuntu-latest
+    needs: deploy-qa
+    environment: production
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+    steps:
+      # &ref=$GITHUB_SHA — más crítico aún que en QA: entre "waiting for
+      # review" y el approve pueden pasar horas y main puede haberse movido.
+      # Sin el ref, aprobás la corrida del commit A y se despliega lo último
+      # que haya. El aprobador estaría firmando algo que no se despliega.
+      - name: Disparar deploy en Render (backend + front) — del commit aprobado
+        env:
+          HOOK_API: ${{ secrets.RENDER_HOOK_API_PROD }}
+          HOOK_FRONT: ${{ secrets.RENDER_HOOK_FRONT_PROD }}
+        run: |
+          curl -fsS --max-time 30 "$HOOK_API&ref=$GITHUB_SHA"
+          curl -fsS --max-time 30 "$HOOK_FRONT&ref=$GITHUB_SHA"
+
+      - name: Smoke test PROD
+        shell: bash
+        env:
+          URL_API: https://miapp-api-prod.onrender.com
+          URL_FRONT: https://miapp-front-prod.onrender.com
+        run: |
+          echo "Esperando a que PROD esté vivo..."
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 10 "$URL_API/health" \
+               && curl -fsS --max-time 10 "$URL_API/api/habits" > /dev/null \
+               && curl -fsS --max-time 10 "$URL_FRONT/" > /dev/null; then
+              echo "✅ PROD responde (API + BD + front)"; exit 0
+            fi
+            echo "  intento $i/30: aún no responde — espera 20s"
+            sleep 20
+          done
+          echo "❌ PROD no respondió a tiempo"; exit 1
