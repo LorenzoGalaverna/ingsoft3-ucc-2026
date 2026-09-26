@@ -4,6 +4,40 @@ Este archivo se acumula TP a TP: cada trabajo agrega su sección al final. El m�
 
 ---
 
+## Enlaces del TP6
+
+Todo lo que necesita quien corrige para navegar el TP6 en vivo, en un solo lugar (los paquetes y las URLs viven afuera del repo; las dos corridas son dos entre muchas — si no están acá, no se buscan).
+
+### Entornos desplegados
+
+- **QA**   → https://miapp-front-qa.onrender.com (y su api: https://miapp-api-qa.onrender.com)
+- **PROD** → https://miapp-front-prod.onrender.com (y su api: https://miapp-api-prod.onrender.com)
+
+⚠️ Primer request tras idle puede tardar ~1 min por el cold start del free tier de Render.
+
+### Paquetes públicos (docker pull sin credenciales)
+
+- `ghcr.io/lorenzogalaverna/ingsoft3-ucc-2026-backend:sha-4e2d61f474836cd0c397e9a8672e8456964b197b`
+- `ghcr.io/lorenzogalaverna/ingsoft3-ucc-2026-frontend:sha-4e2d61f474836cd0c397e9a8672e8456964b197b`
+
+Comprobable desde cualquier máquina: `docker logout ghcr.io && docker pull --platform linux/amd64 <la URL de arriba>`.
+
+### La cadena de 3 eslabones (Tarea 1 §Entregables)
+
+- **PR con "Entrar al registry" salteado** → [job build-backend del PR #25](https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/actions/runs/36249474527/job/108424686218) — muestra el segundo eslabón: pasó todo y aun así no publicó, porque no era `main`.
+- **Corrida de `main` con "Construir y publicar" como ÚLTIMO step** → [run 36249591947](https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/actions/runs/36249591947) — muestra el tercer eslabón: publicar es lo último; si algo falla antes, no llega a correr.
+
+### Evidencia del gate humano (Tarea 4 §Entregables)
+
+- **Rechazo con motivo específico** → [run 36277553328](https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/actions/runs/36277553328) — deploy-prod = failure. Motivo registrado: *"Este PR sólo cambia copy del front — rechazo esta corrida para dejar la evidencia obligatoria del §3.4 y aprobar el próximo PR con dos cambios juntos"*.
+- **Aprobación exitosa** → [run 36277945053](https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/actions/runs/36277945053) — deploy-prod = success, PROD live con los cambios visibles acumulados de los PRs #28 y #29.
+
+### Release
+
+- [v6.0.0 — TP6](https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/releases/tag/v6.0.0) — apunta al commit `4e2d61f`, el que efectivamente está corriendo en PROD.
+
+---
+
 # TP1 — Git colaborativo
 
 ---
@@ -709,4 +743,304 @@ Todo lo que está en esta sección lo puedo explicar. En particular:
 | El artifact de coverage se sube y se puede descargar | Los steps `actions/upload-artifact@v4` con nombres `coverage-backend` y `coverage-frontend` — visible en la sección "Artifacts" del run |
 
 **Cómo lo pienso defender**: la demostración central se hace navegando el PR #23 en vivo — mostrar que está abierto ahora, ver el check `build-backend: FAILURE` en la parte de abajo, click en "Details" y llegar al log del docker build donde vitest imprime el `ERROR: Coverage for lines (60 %) does not meet global threshold (70 %)`. Después ir al PR #22 y mostrar la secuencia rojo → verde del historial de commits: el primer commit rompió, el segundo destrabó, la diferencia es un solo archivo (`prioridad.test.js`). Y para la conversación sobre cobertura vs. calidad, abrir `prioridad.test.js` en vivo y mostrar el `it.each` de cinco casos con el comentario "un caso por CAMINO del código nuevo".
+
+---
+---
+
+# TP6 — CD: environments, aprobaciones y deployment patterns
+
+**Peso: 25 % de P2** — el pipeline pasa de sólo **verificar** (TP4+TP5) a **entregar**: cada cambio integrado llega automáticamente a QA, y a PROD sólo con aprobación humana explícita. Los entregables se navegan en vivo — Actions, Deployments, Releases, `docker pull` desde afuera. La lista corta de enlaces está arriba de todo en este archivo, en la sección "Enlaces del TP6".
+
+---
+
+## 1. El artefacto: por qué el registry es confiable
+
+Hasta el TP5 el pipeline dejaba un tilde verde y un reporte de cobertura. Desde el TP6 deja **una imagen etiquetada por commit** en `ghcr.io`, y esa imagen es la unidad que después se despliega.
+
+La cadena que garantiza que en el registry sólo haya imágenes verificadas **no es un control nuevo** — sale de encadenar tres cosas que ya tenía:
+
+1. **Nada entra a `main` sin verde**: el gate de branch protection del TP4 (dos required checks: `build-backend` y `build-frontend`) sumado al umbral de cobertura del TP5 (70 % lines + branches).
+2. **Sólo `main` publica**: `push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}` en el paso de `docker/build-push-action@v7`. En un PR el step corre igual (verifica que se puede construir) pero no sube nada.
+3. **Publicar es el ÚLTIMO paso del mismo job que corrió los tests**: si el step "Correr tests con coverage" muere, el job muere ahí y "Entrar al registry" + "Construir y publicar" **nunca llegan a correr**. No hay ningún `if: success()` explícito porque no hace falta — la semántica default de los pasos ya lo garantiza (si algo falla antes, no se llega).
+
+**Qué dejaría de significar el registry si publicara sin el eslabón 3**: el registry sería un depósito de "cosas que alguien construyó alguna vez", no de "cosas que pasaron la verificación completa". Es un cambio de sentido, no de forma — nadie te avisa que rompió, la cadena se disuelve en silencio. Por eso las dos evidencias del §Entregables Tarea 1 apuntan a esto:
+
+- Un PR con "Entrar al registry" **salteado** (por `if: github.event_name == 'push'`): prueba que un cambio que **no fue integrado** no publica ([run 36249474527/job/108424686218](https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/actions/runs/36249474527/job/108424686218)).
+- Una corrida de `main` con "Construir y publicar la imagen" como el **último** paso, después de los tests ([run 36249591947](https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/actions/runs/36249591947)). En el log del job se ve el orden: 1-checkout · 2-buildx · 3-tests (target `test`) · 4-extraer coverage · 5-publicar resumen · 6-publicar artifact · 7-login ghcr · 8-**construir y publicar**.
+
+**Honestidad honesta que va en la defensa**: la cadena garantiza lo que el **pipeline** publica, no lo que físicamente puede entrar. Yo, desde mi notebook, puedo hacer `docker push ghcr.io/…-backend:hackeado` a mano y nadie me lo impide (mientras tenga el `write:packages` token, que tengo). La disciplina de que en el registry sólo haya imágenes verificadas descansa en dos cosas: la cadena del pipeline + la disciplina del equipo de no pushear a mano. Una es técnica, la otra es cultural.
+
+---
+
+## 2. Continuous Integration vs Delivery vs Deployment: qué implementé
+
+Los tres términos que la industria mezcla:
+
+- **Continuous Integration** (TP4/TP5): cada cambio se integra y se **verifica** automáticamente. Termina en un artefacto verificado, que no va a ningún lado solo.
+- **Continuous Delivery** (este TP): cada cambio verificado queda **listo para desplegarse con un click** — el pipeline llega hasta prod, pero el último paso lo autoriza un humano. El despliegue es una **decisión de negocio**.
+- **Continuous Deployment**: se saca al humano — todo cambio que pasa las verificaciones llega solo a prod.
+
+**Implementé Continuous Delivery** — QA automático + PROD detrás de aprobación. La razón concreta es de **madurez de red de seguridad**:
+
+- Tengo tests unitarios con umbral de cobertura (TP5) → red de seguridad *decente* para verificar que el código no está totalmente roto.
+- Pero **no tengo**: tests de integración end-to-end contra QA/PROD (más allá del smoke test de 3 llamadas), tests de contrato entre front y back, monitoreo real con alertas (eso es TP9), rollback probado bajo carga.
+
+Con esa red, automatizar el approve a PROD sería **automatizar la propagación de errores**: cualquier bug que se cuele en los unit tests aparece directo en producción, sin ninguna pausa humana para atraparlo. Continuous Deployment requiere una madurez que no tengo hoy — y reconocer eso es parte del argumento profesional.
+
+**Deploy ≠ release** es la otra distinción que se pide defender: *desplegar* es poner binarios nuevos a correr; *release* es exponer la funcionalidad a los usuarios. Con **feature flags** se puede desplegar código apagado y prenderlo después — desacoplando el riesgo técnico del riesgo de producto. Mi TP6 no implementa flags — un cambio se despliega y ya está expuesto —, pero para la app real, un flag sobre la funcionalidad de "rachas" (§8 de este documento) tendría sentido: podría llegar a prod con la lógica pero apagada, y prender para el 10 % primero.
+
+---
+
+## 3. Diseño de la cadena: needs, if, environments, secrets
+
+El `ci.yml` tiene 4 jobs, en este orden:
+
+```
+build-backend  (sin needs)                           ← verifica + publica imagen
+build-frontend (sin needs)                           ← verifica + publica imagen
+deploy-qa      needs: [build-backend, build-frontend] ← automático, environment: qa
+               if: github.ref == 'refs/heads/main'
+deploy-prod    needs: deploy-qa                       ← pausado, environment: production
+               concurrency: deploy-prod
+```
+
+**Por qué esta forma**:
+
+- **`needs:` implementa la cadena con compuertas** — no hay `deploy-qa` sin CI verde, no hay `deploy-prod` sin QA verde.
+- **`if: github.ref == 'refs/heads/main'` sólo en `deploy-qa`**: no lo repito en `deploy-prod` (y no es olvido). Como `deploy-prod` depende de `deploy-qa`, y `deploy-qa` sólo corre en main, en un PR ninguno de los dos arranca. La condición se hereda por la cadena.
+- **`environment: qa` / `environment: production`**: cada job hereda los secrets de SU environment (los deploy hooks) y suma al historial de *Deployments* del repo (link en el sidebar de la home). QA no tiene protection rules — es automático a propósito. PROD tiene required reviewer.
+- **`concurrency: { group: deploy-prod, cancel-in-progress: false }`**: evita que dos deploys a prod se pisen si llegan dos merges seguidos. La documentación de GitHub y la discusión #17401 dicen que **NO cubre el caso** de aprobar una corrida vieja después de una nueva (una corrida esperando aprobación no está "en cola", está en otro estado). La cátedra no lo midió — la mitigación real es rechazar la vieja a mano, con motivo, y aprobar la nueva.
+
+**Alcance de secrets — los tres niveles del TP4 aplicados de verdad**:
+
+| Secret | Alcance | Por qué |
+|---|---|---|
+| `GITHUB_TOKEN` | Auto (por job) | Vive lo que dura el job. Le da permiso a `docker/login-action@v4` para publicar en ghcr.io. No lo guardo yo — GitHub lo entrega |
+| `RENDER_HOOK_API_QA` + `RENDER_HOOK_FRONT_QA` | Environment `qa` | Sólo un job con `environment: qa` los ve. En un PR el job de QA sale salteado por el `if` — así que en un PR estos secrets **no se cargan aunque el YAML los referencie** |
+| `RENDER_HOOK_API_PROD` + `RENDER_HOOK_FRONT_PROD` | Environment `production` | Sólo un job con `environment: production` los ve **y sólo después de que un reviewer apruebe**. Sin approve, el job no arranca, y los secrets no se materializan. Es la diferencia clave con QA: acá el gate humano gobierna incluso la carga del secret |
+
+**Qué pasaría si los secrets estuvieran en el repo** (repository secrets): cualquier job del workflow los vería, incluidos los jobs que corren sobre PRs de contributors nuevos si el flujo lo permitiera. Alguien con acceso al repo podría escribir un PR malicioso que hiciera `echo ${{ secrets.RENDER_HOOK_API_PROD }} > /tmp/…` en un step aparente inofensivo. El alcance por environment corta eso porque el job que despliega a prod está guardado por la aprobación.
+
+**`&ref=$GITHUB_SHA` en el hook — el detalle del §3.3 que gobierna todo lo demás**: sin ese parámetro, el hook de Render deploya **la punta de la rama** en el momento de la ejecución, no el commit que el pipeline verificó. Con dos merges seguidos, la corrida del primero desplegaría el segundo — y "se promueve lo mismo que se verificó" deja de ser cierto justo donde el práctico lo enseña. En PROD el problema se agrava: entre "waiting for review" y el approve puede pasar tiempo real (horas o más), y `main` puede haberse movido varias veces — sin el ref, aprobás la corrida del commit A y a prod sube lo último, y el aprobador estaría firmando algo que no se despliega. El `&` en vez de `?` es porque el hook de Render ya trae un parámetro (la key).
+
+---
+
+## 4. Qué mira mi aprobador antes de aprobar (los criterios del gate)
+
+Una aprobación **sin criterios** es teatro. Los míos, en orden:
+
+1. **El commit del run coincide con el commit que quiero desplegar**. Chequeo el link del run y el SHA en el header. Si veo un SHA que no reconozco (porque entró otro merge en el medio y estoy aprobando una corrida vieja), **rechazo** — no es el momento de dar OK.
+2. **El job `deploy-qa` salió en verde en esta misma corrida**. Si el smoke a QA cayó, PROD no debería recibir el mismo commit sin investigar por qué.
+3. **Los cambios del PR no tocan cosas que necesiten una ventana** — migración de esquema, cambio de variable de entorno crítica, algo que pueda romper sesiones activas. Si tocan, coordino: aviso, hago downtime programado.
+4. **Nada de esto es "viernes 7 pm no desplegamos"** — ese ejemplo es del video de la cátedra y la guía advierte que ya está tomado. Los motivos genéricos son teatro; los específicos son el gate haciendo su trabajo.
+
+**Cuándo el gate NO agrega valor**: cuando lo tengo que apretar 20 veces al día. Ahí el humano se transforma en botón mecánico y el gate deja de discriminar — la señal se pierde en el ruido. La respuesta profesional es subir la red de seguridad automatizada (tests de integración, canary con auto-rollback por métrica, feature flags) para poder ir a Continuous Deployment de verdad.
+
+**Lo que mi aprobador (yo) NO puede ver**: si el `/health` está mintiendo (respondiendo 200 con la BD colgada), si el bundle del front tiene un tamaño anómalo que va a romper la 3G, si algo en Neon está sobre cuota y va a colapsar en 20 minutos. Todo eso es observabilidad — es exactamente el gap que TP9 (monitoreo) cierra.
+
+---
+
+## 5. El free tier de Render + cómo lo maneja mi pipeline
+
+Contrato del tier gratuito de Render (a jul-2026):
+
+| Restricción | Número | Qué implica |
+|---|---|---|
+| Horas de instancia por **workspace** (todos los servicios juntos) | 750/mes | 4 servicios despiertos 24/7 se comen 2880 hs — inviable. En mi caso, los servicios duermen tras 15 min sin tráfico, así que 750 hs sobran para las corridas de deploy + demostración |
+| Minutos de build por workspace | 500/mes | Cada deploy reconstruye 2 servicios × ~3-5 min = 6-10 min. 500 min ≈ 50 deploys. Suficiente para el TP; a controlar cerca de la defensa si hago muchos ciclos |
+| Sleep tras idle | 15 min | Primer request post-idle acepta la conexión pero puede tardar hasta ~1 min en contestar |
+| Almacenamiento y compute de Neon (BD) | 0.5 GB · 190h/mes | Sobra ampliamente para 2 databases con tablas casi vacías |
+
+**Cómo lo maneja el pipeline**:
+
+- **Smoke test con 30 reintentos × 20 s = 10 min máx**: absorbe el peor caso "servicio dormido + build completo en curso". Un `curl` seco daría falsos rojos.
+- **`--max-time 10` en cada `curl` del smoke**: un servicio despertando puede aceptar la conexión y no contestar. Sin tope, el `curl` cuelga y el job muere por el timeout del runner (6 h), no por el timeout del entorno. El error se ve mal.
+- **Sin keep-alive**: intencional. No hago ping cada 5 min para que los servicios no duerman, porque eso consumiría las 750 hs del workspace y en el peor caso me suspenderían **todos** los servicios hasta fin de mes.
+
+**Limitación honesta que va a la defensa**: el smoke test puede dar verde contra la versión vieja mientras Render aún está buildeando. El hook responde al instante y el build corre en background — mientras tanto Render sigue sirviendo la versión anterior. La mitigación clásica (que `/health` devuelva el commit desplegado y el smoke compare) es **obligatoria en TP7**, opcional en el TP6. La otra opción es preguntarle a la API de Render por el estado del deploy con `dep-…` id — más complejo y requiere un API key.
+
+---
+
+## 6. Qué garantía perdemos porque Render **reconstruye** desde el repo
+
+El §3.2 de la guía marca esto en 🚨🚨 y hay que decirlo en la defensa:
+
+> El pipeline ya publica **la imagen que verificó** (§3.0), pero Render **vuelve a construir** tus dos contenedores desde el repositorio. Lo que corre en QA y PROD **NO es la imagen que los tests aprobaron**: es **otra construcción** del mismo commit.
+
+¿Puede salir distinto? Sí, en tres formas concretas:
+
+1. **Dependencias no lockeadas**: si el `npm ci` levanta una versión distinta de una transitiva porque el registro subió un patch minor. Yo tengo `package-lock.json` commiteado, así que el riesgo es bajo — pero no cero (una capa base de Node 22-alpine puede cambiar entre builds si el tag `alpine` avanzó).
+2. **Imagen base**: si `node:22-alpine` o `nginx:alpine` cambió entre el build del pipeline y el build de Render. Los tags flotantes son un riesgo real.
+3. **Contexto no reproducible**: si un `RUN` depende del reloj, de una API externa, de un `curl` a algo que puede fallar en el segundo build.
+
+**En mi app hoy**: los tres riesgos son bajos (Node 22-alpine se mueve poco, `npm ci` con lock respeta lo grabado, mis Dockerfiles no llaman a nada externo). Pero la **garantía** de "se despliega exactamente lo que se probó" **no la puedo dar** — lo que puedo dar es "se despliega el mismo commit". Es una diferencia de definición.
+
+**Lo que cierra esto es el TP7**: ahí Render deja de construir y **ejecuta la imagen del registry** — la misma que verificaron los tests. Este TP tiene el pipeline listo para eso: la imagen ya está publicada con `sha-<commit>` en ghcr, sólo falta apuntar el runtime a ella en vez de al repo.
+
+---
+
+## 7. Qué prueba mi smoke test y qué **no**
+
+Prueba 3 cosas, en 3 llamadas encadenadas con `&&`:
+
+1. `GET /health` → el proceso Node está vivo y respondiendo.
+2. `GET /api/habits` → **la BD responde**. Un `/health` que sólo verifica el proceso puede dar verde con la connection string rota; el `/api/habits` obliga a que Prisma abra conexión con Neon y devuelva la lista. Si Neon está caído o la DB no existe, sale 500.
+3. `GET /` del front → **nginx sirviendo el `dist/`**. Si la plantilla del `nginx.conf` explotó (por ej. envs no seteadas → `envsubst` deja `${…}` literal → nginx no arranca), el front no contesta 200.
+
+**Qué NO prueba** (esta es la parte que la defensa pregunta):
+
+- **NO prueba qué commit está corriendo**. Contesta verde con la versión vieja mientras Render aún buildea. Solución en TP7: `/health` que devuelva el `git.sha` incrustado como env var al build; el smoke lo compara con `github.sha`.
+- **NO prueba las rutas de escritura**. Sólo GETs. Un `POST /api/habits` con un token vencido podría fallar y no me entero.
+- **NO prueba flujos multi-request** (crear un hábito → completarlo → verificar XP). Sólo verifica que las 3 rutas puntuales devuelvan 2xx.
+- **NO prueba performance ni carga**. Si `/api/habits` tarda 8 segundos en devolver, el smoke pasa igual. Un p95 alto en prod pasa por acá sin señal.
+
+El smoke es un **latido de vida**, no una suite de aceptación. Para aceptación real hay que agregar tests de integración e2e — quedan para cuando la app crezca.
+
+---
+
+## 8. Deployment pattern para producción real + rollback
+
+**Para esta app en una producción real con usuarios elegiría rolling con feature flags para features riesgosas.** Justificación por dimensión:
+
+| Pattern | Fit para mi app | Por qué |
+|---|---|---|
+| **Recreate** | ❌ | Downtime — inaceptable para una app con usuarios activos escribiendo hábitos |
+| **Rolling** | ✅ | Sin downtime, sin duplicar infra. Reemplaza instancias de a tandas — perfecto para una app stateless (mi backend lo es: toda la persistencia va a Neon) |
+| **Blue-green** | ➖ | Excelente rollback (segundos), pero cuesta 2× infra. Overkill para el estado actual — vale la pena para apps con SLA de disponibilidad estricto |
+| **Canary** | ➖ | Requiere métricas y observabilidad reales para decidir cuándo cortar el canario. Sin monitoreo (TP9 pendiente), es ruleta |
+| **Feature flags** | ✅ (complementario) | Perfecto para desacoplar deploy de release en features como "rachas" o "bosses" — desplegar código apagado y prenderlo por usuario o % |
+
+**Combo**: rolling para la infraestructura de despliegue + flags para las features nuevas. Es el patrón más común en la industria para SaaS de tamaño mediano.
+
+**Qué me falta hoy para hacer canary en serio**: (1) métricas de negocio (tasa de completions por sesión, error rate por endpoint), (2) sistema de flags externo (LaunchDarkly, Unleash, o incluso una tabla en la BD que se lea en cada request), (3) alertas que digan "el canario sangra" — sin eso el canary es una ruleta con más pasos.
+
+### Plan de rollback actual — cronometrado en vivo
+
+Si un deploy aprobado a PROD sale mal, mi plan es **disparar los mismos hooks con el SHA del último deploy bueno anterior**. Como el deploy se dispara con `&ref=$GITHUB_SHA` desde el pipeline, es la simetría exacta — sólo cambia el SHA.
+
+**Comandos exactos**:
+
+```bash
+export SHA_ANTERIOR=$(git rev-list -n1 v6.0.0)      # el tag apunta al último bueno
+read -rs HOOK_API_PROD && export HOOK_API_PROD      # copia del secret de Render (no queda en historial)
+read -rs HOOK_FRONT_PROD && export HOOK_FRONT_PROD
+INICIO=$(date +%s)
+curl -fsS "$HOOK_API_PROD&ref=$SHA_ANTERIOR"
+curl -fsS "$HOOK_FRONT_PROD&ref=$SHA_ANTERIOR"
+# … esperar a que Render → Deploys muestre ese commit como Live en los 2 servicios
+echo "rollback: $(( $(date +%s) - INICIO )) s"
+```
+
+**Cronometrado el 2026-09-26**:
+
+- **Contexto**: PROD estaba en `706aeeb` (PR #30, cambio del bar caption a "para el nivel"). Rollback a `v6.0.0` = `4e2d61f`.
+- **Hooks disparados**: 20:07:49.
+- **PROD live con `4e2d61f`**: 20:08:30 — polling contra `https://miapp-front-prod.onrender.com/` detectó que la referencia al bundle cambió de `assets/index-BdXrYBdZ.js` (build del commit `706aeeb`) a `assets/index-BhdAvlUf.js` (build del commit `4e2d61f`), y el texto "hasta nivel" (viejo, del v6.0.0) volvió a estar presente en el bundle nuevo.
+- **Tiempo total del rollback: `41` segundos.**
+
+**Nota honesta sobre el número** — 41 s es sospechosamente rápido para un rollback en Render. La explicación probable: Render **cacheó el build de `4e2d61f`** porque ese commit ya se había buildeado ~30 min antes (para el deploy del PR #29). Un rollback "en frío" a un commit que Render no tuvo nunca puede tardar 3-5 minutos (build completo + cold start). 41 s es el mejor caso — el peor real esperado es ~5 min. Para la defensa: el número mide **rollback con cache tibio en la infraestructura del proveedor**, no el peor caso en frío.
+
+**Qué se pudo medir con este método (bundle JS del front cambia)**: el rollback del **front** — que es donde vive el cambio visible.
+
+**Qué el rollback NO deshace** — la respuesta clave que la defensa busca:
+
+- **Los datos escritos con la versión mala** siguen ahí. Si el commit mergeado corrompió los `xp` de todos los users, revertir el código no restaura los valores previos — hay que hacer un data fix aparte (script + verificación) o restaurar la BD desde backup.
+- **Las migraciones de esquema aplicadas**. Si el commit malo agregó una columna nueva y el rollback vuelve al código que no la conoce, la columna sigue existiendo (inofensiva mientras el código no la use). Si el commit malo **borró** una columna, esa columna ya no está — y el rollback no la trae de vuelta. Es un caso concreto de por qué las migraciones destructivas son peligrosas y hay que planearlas con "rollback plan de datos" aparte del rollback de código.
+- **Cambios en configuración externa** (env vars de Render seteadas manualmente, hooks nuevos, servicios agregados): el rollback de código no los revierte. En este TP no cambio esas cosas por deploy, pero en producción real es un riesgo real.
+
+**Métrica DORA que estoy ejercitando**: **MTTR (Mean Time To Restore)** — la 4ta métrica de DORA. Medir mi tiempo de rollback en frío es la única forma de convertirla de estimación a número.
+
+---
+
+## 9. Si Render desaparece mañana: qué sobrevive y qué migra
+
+**Sobrevive sin cambios**:
+
+- La imagen publicada en ghcr.io (`ghcr.io/lorenzogalaverna/…-{backend,frontend}:sha-<commit>`) — es un artefacto identificable con SHA, portable a cualquier runtime que corra contenedores.
+- El pipeline entero hasta el paso de "publicar la imagen" — build, test, coverage gate, publish, tag: es genérico.
+- Los environments `qa` y `production` de GitHub con sus reglas de protección — no dependen de Render.
+- La cadena `needs: [build-*] → deploy-qa → deploy-prod` — es del YAML, no del destino.
+- Los archivos `default.conf.template` del nginx con `${BACKEND_URL}` — funcionan igual con cualquier proveedor.
+
+**Hay que migrar** (cambio de dirección, no de concepto):
+
+- Los 4 servicios de Render → 4 servicios equivalentes en otro proveedor (Fly.io, Railway, Azure Web Apps F1, o self-hosted runner + docker-compose del §3.6).
+- Los deploy hooks de Render → el mecanismo del nuevo proveedor (Fly usa `flyctl deploy --image`, Railway `railway up`, Azure `az webapp deploy`, K8s `kubectl set image`).
+- La connection string de Neon → otra base Postgres (RDS, Cloud SQL, Supabase, o cualquiera).
+
+**Lo que hace posible la migración barata** es exactamente lo que este TP me obligó a hacer: (a) sacar la config afuera de la imagen (`DATABASE_URL`, `BACKEND_URL`), (b) usar una imagen inmutable con SHA, (c) tener el deploy disparado por el pipeline (no por el proveedor). Nada de eso está atado a Render.
+
+---
+
+## 10. Problemas encontrados y cómo los resolví
+
+### a) `error writing layer blob: not_found` al publicar la imagen del frontend
+
+La primera vez que la corrida del `feature/deploy-qa` corrió, `build-frontend` falló con:
+
+```
+#19 ERROR: error writing layer blob: not_found
+ERROR: failed to build: failed to solve: error writing layer blob: not_found
+```
+
+**Causa**: los dos steps del job de frontend (`Correr tests con coverage` y `Construir y publicar la imagen`) escribían al mismo `cache-to: type=gha,scope=frontend`, y colisionaron. El primero llenaba el cache; el segundo intentaba reescribirlo con capas del stage final, y buildkit tiró error de concurrencia.
+
+**Fix**: quité el `cache-to` del step de publicar y dejé sólo `cache-from`. El step de tests es el que llena el cache; el de publicar sólo lo lee. Sin contención, y de yapa ahorro un upload de cache por corrida. Aplicado también al backend por consistencia (aunque en backend no había fallado — cuestión de suerte).
+
+### b) `Construir y publicar` corre pero `push: false` en el PR — no publica
+
+El paso `docker/build-push-action@v7` con `push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}` **corre** en el PR (para verificar que la imagen se construye) pero **no publica**. Al principio pensé que iba a salir salteado como "Entrar al registry", pero la action tiene su propia semántica: el `if:` del step decide si corre; el `push:` decide si empuja.
+
+**No es un bug, es cómo funciona la action** — y es la parte que dice la guía §3.0: "En los Pull Requests no se publica nada, y está bien. Con `push:` atado al evento, la corrida del PR construye y verifica igual, pero no sube nada". El evidence link #1 de la Tarea 1 es el step "Entrar al registry" salteado — ése sí se saltea de verdad.
+
+### c) Cancelé el workflow por error en vez de rechazar el deploy
+
+Mid-flujo, al llegar al primer gate de PROD, apreté "Cancel workflow" (botón arriba del run) en vez de "Review deployments". El run quedó como `cancelled`. **No se perdió nada** — hice un "Re-run all jobs" que arrancó una nueva corrida con el mismo SHA, y esta vez completé el flujo correctamente (rechazo → PR nuevo → aprobación).
+
+**Lección práctica que va al defensa**: la UI de GitHub tiene tres botones cerca cuando hay un deploy pausado ("Cancel workflow" arriba a la derecha, "Re-run all jobs" arriba a la izquierda, "Review deployments" arriba del job pausado). El correcto para el gate es **Review deployments** — el del medio. Los otros dos parecen razonables pero son otra cosa.
+
+### d) La primera vez aprobé cuando quería rechazar (no leí el motivo del texto)
+
+Además de (c), en otro run apreté "Approve and deploy" sin poner motivo cuando el plan era rechazar. Se me pasó que el modal tenía dos botones y elegí el verde por reflejo.
+
+**Fix operativo**: para la próxima corrida (PR #28, que sí rechacé correctamente) me detuve, leí el modal completo, redacté un motivo específico antes de tocar, y confirmé el botón rojo. La UI no cambia por explicarla — la que cambia es la disciplina de leer antes de clickear.
+
+### e) El bar-caption del front no cambia el hash del bundle si Vite lo optimiza distinto
+
+Cuando arranqué el polling para cronometrar el rollback, la primera versión del script comparaba el HTML del front — no sirvió porque el SPA de React sirve el mismo `index.html` con distintas referencias al bundle. La solución fue comparar el nombre del bundle `assets/index-<hash>.js` — cada build de Vite genera un hash único (a menos que el contenido sea idéntico byte-por-byte, cosa que no pasa entre commits distintos).
+
+---
+
+## 11. Declaración de uso de IA
+
+Mismo esquema que en TP1-TP5: asistente de IA (Claude Opus 4.7 en Claude Code) con supervisión activa. Este TP tiene la característica de que la mitad del trabajo la ejecuté yo en la UI de GitHub y de Render (aprobaciones, rechazos, configuración de env vars, creación de servicios) — la IA no puede tocar esas cosas, así que la línea entre "yo" y "asistente" fue especialmente nítida.
+
+### Lo que decidí y controlé
+
+- **La elección de proveedor**: Render + Neon, sobre las alternativas de Fly.io (pide tarjeta), Railway (trial), Koyeb (dejó de ser garantizado) y self-hosted (fallback del §3.6). Elegí Render+Neon porque es el canónico de la guía y no requiere tarjeta.
+- **Cada acción con blast radius sobre la infra**: crear los 4 servicios en Render, setear `DATABASE_URL` con la connection string de Neon correcta en cada uno, marcar Auto-Deploy = OFF, cambiar `BACKEND_URL` en los dos fronts a la URL correcta del entorno (crítico — pisar una por otra deja PROD hablando con la BD de QA sin ningún error visible).
+- **Cada aprobación y rechazo del gate humano**: yo entré a la UI de GitHub, leí el modal, redacté el motivo del rechazo, y confirmé el botón. El asistente no puede aprobar deployments — el gate literalmente no lo alcanza.
+- **La decisión de rotar o no los deploy hooks después de haberlos pegado en el chat**: opté por asumir el riesgo (bajo — el chat no se comparte, y el peor daño sería que alguien me dispare deploys y me consuma minutos de build). Registrado como decisión consciente, no como omisión.
+- **El motivo específico del rechazo**: lo redacté yo, sin usar el ejemplo del video de la cátedra ("viernes 7pm no desplegamos"). Está registrado en el run 36277553328 y es defendible en la mesa.
+- **Los 4 PRs de UI + el commit del rollback**: cada cambio de texto lo elegí yo — no son cambios inventados por el asistente sobre placeholder, son textos que quiero en la app.
+
+### Lo que ejecutó el asistente (bajo mi indicación)
+
+- La escritura del `ci.yml` con los 4 jobs, y en particular el diseño del gate (needs, if, environment, concurrency, `&ref=$GITHUB_SHA`) — cada línea la puedo explicar (§3 de este documento).
+- El refactor de `nginx.conf` → `default.conf.template` + los cambios del `Dockerfile` del front para procesar templates. Verifiqué localmente con `sed` que los defaults del compose no se rompen.
+- Los comandos `gh api` para crear el environment `production` con reviewer + prevent_self_review=false, y los `gh secret set --env` para setear los 4 hooks.
+- El script del rollback cronometrado con polling contra el bundle del front.
+- La redacción inicial de esta sección; revisé cada afirmación contra el estado real del pipeline y de Render.
+
+### Lo que vino dado por el enunciado
+
+Que sea GitHub Actions + environments; que haya QA automático y PROD con aprobación; que el smoke reintente; que la release se etiquete `v6.0.0`; que haya evidencia de un rechazo con motivo específico; que el rollback tenga tiempo medido. Todo en el §Entregables del TP6.
+
+### La defensa oral no se delega
+
+Todo lo que está en esta sección lo puedo explicar. En particular las tres respuestas clave del §Defensa:
+
+- **"¿Cómo probás que lo que está publicado es exactamente lo que pasó la verificación?"** → No es un control, son 3 encadenados: main protegida por 2 checks required + strict; sólo main publica (if en el evento y la rama); publicar es el último step del job que testea (si algo falla antes, no llega). La cadena se lee en la configuración, no se demuestra con un ejemplo — y no es infalible porque yo, con acceso al repo, puedo publicar a mano.
+- **"¿Por qué QA se despliega solo y PROD no?"** → Porque a QA se le rompe todo el tiempo y está bien (es un entorno para probar). A PROD no se puede llegar sin un humano que mire: (a) el timing de negocio, (b) qué cambia este deploy, (c) que quede registrado quién autorizó.
+- **"PROD está roto tras un deploy aprobado: ¿qué hacés?"** → Curl a los 2 hooks de prod con `&ref=$(git rev-list -n1 v6.0.0)`. Cronometrado hoy: **41 segundos** (con Render cacheando el build de ese commit — en frío esperaría 3-5 min). Y lo que **no** deshace el rollback: los datos que la versión mala escribió, y las migraciones destructivas.
 
