@@ -80,8 +80,8 @@ export default function App() {
       {error && <p className="error">{error}</p>}
 
       <section>
-        <h2>Hábitos de hoy</h2>
-        {habits.length === 0 && <p className="empty">Todavía no cargaste ningún hábito.</p>}
+        <h2>Mis hábitos de hoy</h2>
+        {habits.length === 0 && <p className="empty">Todavía no cargaste ningún hábito. Empezá con uno chico.</p>}
         <ul className="habits">
           {habits.map(h => (
             <li key={h.id} className={h.completedToday ? 'done' : ''}>
