@@ -121,7 +121,7 @@ export default function App() {
             onChange={e => setXpReward(e.target.value)}
             aria-label="XP que otorga"
           />
-          <button type="submit" disabled={!name.trim()}>Agregar</button>
+          <button type="submit" disabled={!name.trim()}>Crear hábito</button>
         </form>
       </section>
     </main>
