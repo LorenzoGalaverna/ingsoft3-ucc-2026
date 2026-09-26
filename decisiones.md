@@ -513,3 +513,200 @@ Todo lo que está en esta sección lo puedo explicar en vivo, incluyendo por qu�
 
 **Cómo lo pienso defender**: la demostración central se hace navegando el PR #14 en vivo — mostrar la 1ra corrida en rojo (los dos jobs listados, uno FAILURE con el log del "Could not resolve"), ver el botón de merge deshabilitado, mostrar el 2do commit del fix, ver la 2da corrida en verde con los dos SUCCESS, y el merge finalmente habilitado. Todo en la pestaña *Conversation* del PR — no hace falta salir de ahí. Y para `strict: true`, mostrar el PR #15 (cerrado, no mergeado) con su historial: `Update branch` disparó la 3ra corrida que quedó en verde antes del close.
 
+---
+---
+
+# TP5 — Testing en el pipeline
+
+**Peso: 45 % de P2** — el gemelo pesado del TP4, corrido a la capa de calidad. El TP4 puso un gate por *compilación*; el TP5 pone un gate adicional por *cobertura de tests*. Los dos jobs del TP4 ahora tienen que **construir, testear con cobertura y pasar el umbral** antes de habilitar el merge. La evidencia central son dos PRs abiertos a propósito: PR #22 (rojo → verde, cerrado) y PR #23 (rojo persistente, abierto hasta la defensa).
+
+---
+
+## 1. Elección del runner: **vitest** en front y back
+
+Elegí **vitest** como test runner unificado, en vez de tener Jest en el backend y vitest en el frontend. Motivo concreto: el frontend ya venía con vitest (viene incluido en Vite y comparte config con `vite.config.js`), así que agregar Jest al backend habría significado **dos runners, dos configs de coverage, dos formatos de reporte** — y por lo tanto dos comandos en el pipeline. Con vitest unificado el pipeline corre `npm run test:ci` en las dos partes con la misma semántica y devuelve `coverage-summary.json` con el mismo shape.
+
+Otras alternativas evaluadas:
+
+- **Jest en las dos** — funcionaría, pero requiere babel/swc para ESM en el frontend (Vite compila con esbuild nativo) y hay que mantener dos ecosistemas de plugins.
+- **node:test + node --test** (built-in de Node 22) — sin dependencias, pero sin coverage integrado a la altura de v8, sin `it.each` parametrizado, sin `vi.mock` para las funciones que llaman a Prisma. Habría que escribir helpers para las tres cosas.
+
+**Cómo lo pienso defender**: la elección del runner no es religiosa — es de **costo de mantenimiento**. Un runner y un formato de reporte es un tercio del pipeline; dos runners son dos tercios. La regla que sigo es "menos moving parts que aún hagan lo que necesito".
+
+---
+
+## 2. Umbral de cobertura: **70 % líneas + 70 % branches**
+
+El umbral está declarado en `backend/vitest.config.js` y `frontend/vite.config.js`:
+
+```js
+thresholds: { lines: 70, branches: 70, functions: 70, statements: 70 }
+```
+
+**Por qué 70 % y no 80 % o 90 %**: el enunciado del TP5 §2.4 pide "umbral realista para el proyecto"; el debate típico de cobertura (§3.4 de la guía) es que un umbral demasiado alto empuja a escribir tests decorativos — tests que ejercitan código sin verificarlo — sólo para llegar al número. En una app del tamaño de la materia, con ~10 archivos de dominio y sin código legacy heredado, el 70 % es el punto donde:
+
+- **cualquier rama nueva sin tests baja el número** — así el gate se dispara con cambios chicos (la demo del PR #22 lo probó cayendo a 60 %),
+- pero **queda margen para `src/index.js`** que se excluye a propósito (ver 3), sin obligarme a tests HTTP para todo endpoint,
+- y **no incentiva tests de "cobertura decorativa"** — un `expect(fn(x)).toBeDefined()` que no verifica nada pero suma línea.
+
+**Branches al 70 %, no al 50 %**: la crítica clásica al `--coverage lines` a secas es que un test que pasa por un `if` sin ejercitar la rama `else` cuenta como 100 % de líneas. Poner branches al **mismo** umbral que líneas es lo que fuerza que cada `if` tenga al menos dos casos. La sección 4 muestra el ejemplo concreto donde bajar sólo branches habría enmascarado un bug.
+
+---
+
+## 3. Qué queda fuera del reporte de cobertura y por qué
+
+`backend/vitest.config.js` excluye estos paths:
+
+```js
+exclude: ['src/index.js', 'prisma/**', 'node_modules/**', '**/*.test.js']
+```
+
+- **`src/index.js`** — es el bootstrap del servidor Express: `app.listen()`, wiring de middlewares, el `if (import.meta.url === ...)` que evita levantar el server al importar desde tests. Tiene una sola rama y su verificación real es "el compose levanta" — está cubierto por el healthcheck del TP2, no por unit tests. Testearlo con supertest sería probar Express, no probar mi código.
+- **`prisma/**`** — es código generado (`migrations/`, `seed.js` es idempotente y su verificación es "el compose arranca la 2da vez con `No pending migrations to apply`" — TP2 §2.5).
+- **`**/*.test.js`** — los tests no cuentan como código a cubrir (evita el chiste de "el test se testea a sí mismo, 100 %").
+
+En el frontend excluyo la misma lista + `src/App.jsx` + `src/main.jsx` (componentes de wiring; sus tests reales son visuales y quedan para cuando entre Playwright — fuera de scope del TP5).
+
+**El principio**: la cobertura mide líneas de **lógica de negocio**, no de infraestructura. Cuando el TP6 agregue observability, agregaré `src/observability/` a la exclusión también — no porque no valga la pena testearlo, sino porque su prueba es el dashboard funcionando, no una assertion.
+
+---
+
+## 4. Cobertura alta vs. tests que atrapan bugs: ejemplo propio
+
+El caso paradigmático del debate se puede ver en mi propio `backend/src/domain/prioridad.js`. La función tiene cinco umbrales (`< 1`, `< 3`, `< 7`, `< 30`, else). Un test único con `diasDesdeUltima = 0.5` cubre **la primera rama** y todas las líneas *hasta el primer return*. Métrica de líneas: 60 %. Métrica de branches: 20 %. **Ninguno de los otros cuatro umbrales se ejercita** — si alguien cambia `< 3` por `<= 3`, el test único no se entera.
+
+`prioridad.test.js` (backend/src/domain/prioridad.test.js:11-28) resuelve esto con `it.each` de cinco casos, **uno por rama** — no cinco por gusto, cinco *por camino del código*. Comentario en el archivo:
+
+> "un caso por CAMINO del código nuevo — no un caso por punto arbitrario. Si mañana alguien cambia un umbral (`< 3` por `<= 3`), uno de estos tests se pone en rojo."
+
+Es la diferencia práctica entre 60 % de cobertura sin sentido y 100 % de branches con significado. **La regla que sigo**: cada rama del código nace con al menos un test que la ejercita. Si no, la rama no debería existir.
+
+**Contraprueba**: `backend/src/domain/leveling.test.js` usa `it.each` con dos casos para verificar la fórmula `floor(xp/100) + 1` (xp=0 → nivel 1; xp=99 → nivel 1; xp=100 → nivel 2). Los dos casos ejercitan el borde inferior de nivel N y el salto a N+1 — no son arbitrarios. Si mañana cambio a `floor((xp+50)/100)`, los tests atrapan el bug antes del merge.
+
+---
+
+## 5. Demostración del gate: dos PRs, uno cerrado y uno vigente
+
+### PR #22 — rojo → verde (patrón TP4 aplicado a cobertura)
+
+Secuencia registrada en el PR (https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/pull/22):
+
+1. **Commit rojo** (`d53a0ab`): agrego `backend/src/domain/prioridad.js` con dos funciones y cinco ramas, **sin ningún test**.
+2. **Primera corrida** (https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/actions/runs/36208160657): `build-backend: FAILURE`, `build-frontend: SUCCESS`. El log del `docker buildx build --target test` termina con:
+   ```
+   Statements   : 51.21% ( 21/41 )
+   Branches     : 53.19% ( 25/47 )
+   Functions    : 71.42% ( 5/7 )
+   Lines        : 51.21% ( 21/41 )
+   ERROR: Coverage for lines (51.21%) does not meet global threshold (70%)
+   ERROR: Coverage for branches (53.19%) does not meet global threshold (70%)
+   ERROR: Coverage for statements (51.21%) does not meet global threshold (70%)
+   ```
+   `mergeStateStatus: BLOCKED`. El compose builda, el código no tiene errores de sintaxis, todo *anda* — pero el gate del TP5 lo bloquea igual, porque la calidad bajó.
+3. **Commit verde** (`31fafb5`): agrego `prioridad.test.js` con 5 casos parametrizados + 3 tests de casos borde. Los ocho tests pasan y la cobertura vuelve al 87 % líneas.
+4. **Segunda corrida** (https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/actions/runs/36208282194): los dos jobs en verde, `mergeStateStatus: CLEAN`.
+5. Merge con squash (commit `bec0480` en `main`, run https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/actions/runs/36208326547 confirma que `main` sigue verde después del merge).
+
+Es el mismo patrón del TP4, con **una diferencia crítica**: en el TP4 la rotura era una falla de compilación (`Could not resolve "./no-existe"`), un error obvio que hasta el linter atrapa. En el TP5 la rotura es **código perfectamente compilable, ejecutable, sin errores de sintaxis** — el gate lo bloquea *sólo* porque no lo testeó. Eso es exactamente lo que un gate por calidad tiene que hacer: distinguir "compila" de "tiene tests que respaldan lo que compila".
+
+### PR #23 — rojo persistente hasta la defensa
+
+El enunciado §3.5 del TP5 lo pide con precisión:
+
+> "abrí un SEGUNDO Pull Request, chiquito, con el mismo problema — y dejalo ahí, abierto y en rojo, hasta la defensa. No lo arregles."
+
+PR #23 (https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/pull/23) agrega `backend/src/domain/racha.js` con 42 líneas y 5+ ramas, sin tests. El run https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/actions/runs/36208536054 muestra `build-backend: FAILURE` (job específico: https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/actions/runs/36208536054/job/108310126171) con la cobertura cayendo a **60 % líneas / 57.35 % statements** — bien por debajo del umbral. El PR queda abierto sin merge. La descripción explicita "NO MERGEAR — evidencia del gate vigente".
+
+La diferencia entre los dos PRs no es didáctica sino **estructural**:
+
+- **PR #22 (cerrado)** demuestra que el gate se activa y se destraba — es la película.
+- **PR #23 (abierto)** demuestra que el gate **sigue vigente** después de que otro PR pasó por él — es la foto que congela el momento. Sin él, la defensa muestra un merge exitoso y ya está; con él, la defensa muestra que *ahora mismo* hay un PR que el gate rechaza y no deja mergear.
+
+---
+
+## 6. Stack de testing: qué elegí y para qué
+
+| Herramienta | Para qué | Por qué esa |
+|---|---|---|
+| **vitest** | Runner de tests | Unificado con Vite del frontend; `it.each`, `vi.mock`, `vi.hoisted` nativos; watch mode instantáneo con esbuild |
+| **@vitest/coverage-v8** | Cobertura | v8 nativo (sin instrumentación de bytecode como istanbul) — más rápido, no altera el código bajo test |
+| **supertest** | Tests HTTP del backend | Levanta `app` en memoria (sin `listen()`), permite `.expect(200)` fluido. Un solo test end-to-end del handler `POST /habits/:id/complete` con Prisma mockeado |
+| **vi.hoisted + vi.mock** | Mock de Prisma en `handlers.test.js` | `vi.hoisted` es la única forma limpia de compartir el mock entre la fábrica de `vi.mock` (que se ejecuta antes de los `import`s) y el test. Alternativa (top-level `let mockPrisma`) rompe porque `vi.mock` se hoistea |
+| **vi.fn() (frontend)** | Stub de `fetch` en `api.test.js` | Reemplaza `global.fetch` por una función spy. Verifica el body enviado, no la respuesta real — el contrato con el servidor se prueba en integración |
+| **Docker multi-stage `test` stage** | Correr tests dentro del build | Los tests corren en la **misma imagen** que después se despliega — evita el "en mi máquina anda". El stage `coverage-export` (FROM scratch) permite `--target coverage-export --output type=local` para extraer el reporte al workspace del runner sin cargar la imagen entera |
+
+**Detalle del multi-stage que aprendí a los golpes**: buildkit **skipea stages que ninguna otra stage referencia**. La primera vez el stage `test` se salteaba entero — todo pasaba en verde porque nunca corría. Fix: en el stage `final` agregué `COPY --from=test /app/coverage /_coverage-report` — ese COPY dispara la construcción del stage `test`, y si vitest sale con exit != 0, todo el build muere. Es el mismo patrón que hace que `apk add openssl` del TP2 no se pueda "olvidar": el `RUN` está referenciado por el `CMD`, así que si falla, no hay imagen final.
+
+---
+
+## 7. Problemas encontrados y cómo los resolví
+
+### a) El mock de Prisma dio `TypeError: () => mockPrisma is not a constructor`
+
+Primer intento: `vi.mock('@prisma/client', () => ({ PrismaClient: vi.fn(() => mockPrisma) }))`. Cuando el backend hace `new PrismaClient()`, JS falla con `is not a constructor` porque `vi.fn()` devuelve una función que no puede llamarse con `new`.
+
+**Fix**: reemplazar `vi.fn()` por una **declaración de función real**:
+```js
+vi.mock('@prisma/client', () => ({
+  PrismaClient: function PrismaClient() { return mockPrisma; }
+}));
+```
+Una función declarada con `function` sí soporta ser invocada con `new` (devuelve el objeto retornado, si es objeto). Lo aprendí después de leer el issue de vitest sobre `MockedClass` — la sutileza es que las arrow functions **no tienen `[[Construct]]`**, sólo `[[Call]]`.
+
+### b) `coverage-summary.json` no se generaba
+
+El paso del pipeline que publica el resumen en `$GITHUB_STEP_SUMMARY` usaba `jq` sobre `coverage/coverage-summary.json`, y la primera corrida falló con "no such file". El reporter default de v8 emite `lcov` y `html`, no `json-summary`.
+
+**Fix**: agregar `'json-summary'` explícitamente al array `reporter:` en las dos configs de vitest. La lección: cada reporter que uses en CI tiene que estar en la lista — no hay default útil para pipelines.
+
+### c) La rama de la demo `demo/gate-vigente` tuvo que quedar afuera de la protección
+
+`strict: true` del TP4 exige que las ramas de PR estén actualizadas contra `main`. Como este PR **no se va a mergear**, va a quedar `BEHIND` naturalmente. Está bien — el gate lo bloquea por cobertura *antes* de fijarse en el estado del branch. Es la primera vez que un PR mío bloqueado por **dos** capas del gate (calidad + strict) coexisten y son visibles.
+
+---
+
+## 8. Declaración de uso de IA
+
+Mismo esquema que en TP1-TP4: asistente de IA (Claude Opus 4.7 en Claude Code) con supervisión activa. En este TP la asimetría entre lo humano y lo automatizado es especialmente relevante, porque los tests son literalmente la parte del código que **decide qué es correcto**: delegar su escritura a la IA sin revisión sería delegar la definición misma de "funciona".
+
+### Lo que decidí y controlé
+
+- **La elección del runner** (vitest) y del umbral (70 % líneas Y branches). Comparé alternativas concretas — Jest en las dos, node:test built-in, umbral 80/90 — y descarté cada una con una razón que puedo defender (secciones 1 y 2).
+- **Qué código se excluye del reporte de cobertura**. `src/index.js`, `prisma/**`, `App.jsx`, `main.jsx` — cada exclusión tiene una razón que baja al *tipo* de código que es (bootstrap vs. lógica; generado vs. escrito; wiring vs. dominio).
+- **La estrategia de tests**: pure functions extraídas a `src/domain/` (backend) y `src/lib/` (frontend), un test parametrizado por rama, un test de mock por handler con efectos. La decisión de refactorear a `src/domain/` fue mía — la alternativa (tests de integración directos sobre el handler HTTP) tiene mayor superficie y no separa el problema de la lógica del problema del efecto secundario. Es la razón por la que 8 de 10 tests del backend son sobre funciones puras.
+- **La demostración del gate**: elegí `prioridadDeHabito` para PR #22 y `calcularRacha` para PR #23 explícitamente porque **son código real de la app** — la próxima iteración va a usarlos. No son *strings dummy* del estilo `function foo(x) { return x + 1 }` inventados sólo para bajar la cobertura. Cuando entren al UI (TP siguiente), voy a tener que escribir los tests de `racha.js` para mergear PR #23 — es un plan real, no un truco.
+- **La verificación de cada resultado**: cada `npm run test:ci` local, cada corrida del pipeline, cada valor de cobertura visible en el step summary de la corrida. La cobertura que veo en el pipeline es la que corrí primero en mi máquina — el pipeline no tiene sorpresas.
+
+### Lo que ejecutó el asistente (bajo mi indicación)
+
+- La escritura inicial de los tests (backend/src/domain/*.test.js, backend/src/handlers.test.js, frontend/src/lib/*.test.js) sobre la base de las funciones que ya existían. Revisé cada test antes del commit — en particular verifiqué que cada `it.each` tiene un caso *por rama*, no casos redundantes.
+- La refactorización de `src/index.js` para exportar `app` sin llamar a `app.listen()` (el guard `if (import.meta.url === ...)` lo hace saltar al final sólo cuando se corre como entrypoint, no cuando se importa desde un test).
+- Los comandos `docker buildx build --target test`, la extensión del `ci.yml` con el paso de coverage summary, la creación de los PRs #22 y #23.
+- La redacción inicial de esta sección; la revisé porque los razonamientos de umbral, exclusiones y estrategia son literalmente lo que voy a decir en la mesa.
+
+### Lo que vino dado por el enunciado
+
+Que el test se corra en el mismo pipeline del TP4; que haya cobertura mínima como gate; que el reporte quede visible en el workflow; que haya una demo del rojo. El TP5 §2 y §3 lo enumera. La elección de runner, umbral y estructura sí son mías.
+
+### La defensa oral no se delega
+
+Todo lo que está en esta sección lo puedo explicar. En particular:
+
+- Por qué `it.each` con **cinco casos** para `prioridadDeHabito` y no con uno que barra el rango. Respuesta: cada caso ejercita un camino distinto; un test que atraviesa el rango con un for loop cubre lo mismo pero cuando falla no te dice **qué umbral** rompió.
+- Por qué `vi.hoisted` en el mock de Prisma. Respuesta: `vi.mock` se hoistea al top del archivo (antes de los imports), así que no puede usar una variable declarada abajo. `vi.hoisted` devuelve un objeto que sí es accesible desde la fábrica del mock.
+- Por qué el stage `test` está entre `build` y `final` en el Dockerfile, y no fuera del multi-stage. Respuesta: quiero que los tests corran en la **misma imagen** que se despliega. Correr `npm test` fuera del Dockerfile es una segunda máquina, una segunda instalación de deps, una segunda oportunidad para que "acá anda y allá no".
+
+**Verificaciones contra el estado real del repo**:
+
+| Qué se afirma | Cómo se comprobó |
+|---|---|
+| El gate del TP5 bloquea merges por cobertura, no sólo por compilación | PR #22 corrida `36208160657` — `build-frontend: SUCCESS` (el proyecto compila) y `build-backend: FAILURE` (por umbral). Log del docker build muestra el `ERROR: Coverage for lines...` explícito |
+| El gate se destraba con tests, no con hacks | Segunda corrida del PR #22 (`36208282194`) — mismo Dockerfile, mismo umbral, el único cambio entre commits es `prioridad.test.js` |
+| El gate sigue vigente después de un merge exitoso | PR #23 abierto ahora, corrida `36208536054` en rojo, `mergeStateStatus: BLOCKED`. Es lo que pide §3.5 y es visible clickeando en el PR desde el listado |
+| La cobertura del backend con todo el dominio testeado está sobre umbral | `npm run test:ci` local antes de PR #23 devolvió lines 87 %, branches 82 %. Después del `racha.js` sin tests: lines 60 %, branches 70.31 % (cae abajo del umbral en tres métricas) |
+| Los tests corren dentro del Dockerfile, no en un step aparte | El `ci.yml` sólo tiene `docker/build-push-action` — no hay `npm test` en el YAML. La evidencia del test corriendo es el step `Build and test backend` que hace `--target test` |
+| El reporte de cobertura queda visible en el workflow | El step "Publish coverage summary" arma un table de markdown en `$GITHUB_STEP_SUMMARY` con las cuatro métricas — visible en la pestaña Summary del run, no hay que bajarse el artifact |
+| El artifact de coverage se sube y se puede descargar | Los steps `actions/upload-artifact@v4` con nombres `coverage-backend` y `coverage-frontend` — visible en la sección "Artifacts" del run |
+
+**Cómo lo pienso defender**: la demostración central se hace navegando el PR #23 en vivo — mostrar que está abierto ahora, ver el check `build-backend: FAILURE` en la parte de abajo, click en "Details" y llegar al log del docker build donde vitest imprime el `ERROR: Coverage for lines (60 %) does not meet global threshold (70 %)`. Después ir al PR #22 y mostrar la secuencia rojo → verde del historial de commits: el primer commit rompió, el segundo destrabó, la diferencia es un solo archivo (`prioridad.test.js`). Y para la conversación sobre cobertura vs. calidad, abrir `prioridad.test.js` en vivo y mostrar el `it.each` de cinco casos con el comentario "un caso por CAMINO del código nuevo".
+
