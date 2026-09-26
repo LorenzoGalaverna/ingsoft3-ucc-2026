@@ -73,7 +73,7 @@ export default function App() {
           <div className="bar-fill" style={{ width: `${pct}%` }} />
         </div>
         <p className="bar-caption">
-          {xpIntoLevel} / {XP_PER_LEVEL} XP hasta nivel {user.level + 1}
+          {xpIntoLevel} de {XP_PER_LEVEL} XP para el nivel {user.level + 1}
         </p>
       </header>
 
