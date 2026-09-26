@@ -1,18 +1,24 @@
-# CI — construye backend y frontend con sus Dockerfiles del TP2 + corre la suite
-# de tests y mide coverage en el TP5. La etapa `test` de cada Dockerfile falla
-# entera si el umbral no se cumple → el docker build falla → el job se pone rojo
-# → el gate del TP4 bloquea el merge.
+# CI/CD — construye backend y frontend con sus Dockerfiles del TP2, corre la
+# suite de tests con cobertura del TP5, y —desde el TP6— publica las imágenes
+# etiquetadas por commit en ghcr.io. Sólo publica en push a main y sólo si los
+# tests pasaron (los pasos que publican son los ÚLTIMOS del job: si algo falla
+# antes, el job muere y nunca llegan a correr — §3.0 del TP6).
 name: CI
 
 on:
   pull_request:
     branches: [main]      # el que hace el trabajo: verifica ANTES del merge
   push:
-    branches: [main]      # deja constancia post-merge y siembra el cache para futuros PRs
+    branches: [main]      # deja constancia post-merge, siembra cache y publica
 
 jobs:
   build-backend:
     runs-on: ubuntu-latest
+    # Mínimo privilegio: sólo este job publica paquetes; sin este bloque el
+    # push a ghcr con GITHUB_TOKEN fallaría con "denied: permission_denied".
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Qué estamos verificando
         env:
@@ -25,17 +31,22 @@ jobs:
       - name: Preparar el constructor que sabe cachear
         uses: docker/setup-buildx-action@v4
 
-      - name: Construir la imagen del backend (incluye la etapa `test`)
+      # 1. VERIFICAR — construye hasta la etapa `test` (vitest --coverage).
+      #    Si el umbral no llega, este step muere y los que publican no corren.
+      - name: Correr tests con coverage (etapa `test`)
         uses: docker/build-push-action@v7
         with:
           context: ./backend
-          push: false                    # todavía no publicamos: sólo verificamos
-          tags: habit-tracker-backend:ci
+          target: test
+          push: false
+          tags: habit-tracker-backend:test
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
 
-      # Etapa `coverage-export` del Dockerfile: solo la carpeta /coverage.
-      # `--output type=local,dest=X` escribe X en el runner, listo para artefacto.
+      # 2. REPORTAR — extrae y publica el reporte de coverage. Con
+      #    `if: always()` corre igual si el test falló, para dejar la
+      #    evidencia; NO habilita publicar, porque los pasos que publican
+      #    (más abajo) NO llevan `always()`.
       - name: Extraer reporte de coverage
         if: always()
         run: |
@@ -63,8 +74,35 @@ jobs:
           path: coverage-backend/
           if-no-files-found: warn
 
+      # 3. ENTRAR AL REGISTRY — sólo en push (los PRs no publican). El
+      #    GITHUB_TOKEN vive lo que dura el job: no hay ningún secret nuevo.
+      - name: Entrar al registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 4. ÚLTIMO PASO — construye la imagen final y la publica con la
+      #    etiqueta del commit. Sólo publica en push a main; en PR construye
+      #    igual (segunda verificación) pero no sube nada.
+      #    Nombre en MINÚSCULAS porque ghcr.io no acepta mayúsculas
+      #    (github.repository trae "LorenzoGalaverna/…" con L y G altas).
+      - name: Construir y publicar la imagen del backend
+        uses: docker/build-push-action@v7
+        with:
+          context: ./backend
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ghcr.io/lorenzogalaverna/ingsoft3-ucc-2026-backend:sha-${{ github.sha }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
   build-frontend:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Qué estamos verificando
         env:
@@ -77,12 +115,13 @@ jobs:
       - name: Preparar el constructor que sabe cachear
         uses: docker/setup-buildx-action@v4
 
-      - name: Construir la imagen del frontend (incluye la etapa `test`)
+      - name: Correr tests con coverage (etapa `test`)
         uses: docker/build-push-action@v7
         with:
           context: ./frontend
+          target: test
           push: false
-          tags: habit-tracker-frontend:ci
+          tags: habit-tracker-frontend:test
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
 
@@ -112,3 +151,20 @@ jobs:
           name: coverage-frontend
           path: coverage-frontend/
           if-no-files-found: warn
+
+      - name: Entrar al registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Construir y publicar la imagen del frontend
+        uses: docker/build-push-action@v7
+        with:
+          context: ./frontend
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ghcr.io/lorenzogalaverna/ingsoft3-ucc-2026-frontend:sha-${{ github.sha }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
