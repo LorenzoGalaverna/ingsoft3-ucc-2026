@@ -34,7 +34,9 @@ Comprobable desde cualquier máquina: `docker logout ghcr.io && docker pull --pl
 
 ### Release
 
-- [v6.0.0 — TP6](https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/releases/tag/v6.0.0) — apunta al commit `4e2d61f`, el que efectivamente está corriendo en PROD.
+- [v6.0.0 — TP6](https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/releases/tag/v6.0.0) — apunta al commit `4e2d61f`, el primer commit efectivamente desplegado a PROD con el flujo TP6 completo (después del rollback del §8).
+
+> 📌 **Nota sobre el tag y lo que hay en PROD hoy**: el tag `v6.0.0` apunta a `4e2d61f`. Después de ese commit se mergeó a `main` el PR #31 (`2fd86bf`, sólo docs — este mismo archivo `decisiones.md`) que también llegó a PROD. Como `decisiones.md` **no está adentro de los Dockerfiles**, las imágenes de Render para `2fd86bf` son byte-por-byte idénticas a las de `4e2d61f` — la app en PROD hoy es funcionalmente **idéntica** al v6.0.0. Se puede revertir en cualquier momento al commit exacto del tag con el mismo comando del §8 (cronometrado a 41s).
 
 ---
 
