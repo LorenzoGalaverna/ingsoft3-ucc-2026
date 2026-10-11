@@ -232,6 +232,74 @@ jobs:
           echo "❌ QA no respondió a tiempo"; exit 1
 
   # ────────────────────────────────────────────────────────────────────────
+  # TP7 §3.4 — INTEGRACIÓN: habla con la api de QA, sin navegador
+  # Pirámide: va PRIMERO porque es más rápida y barata. Si la api está
+  # rota (su base responde mal, un endpoint cambió, el schema rompió),
+  # no vale la pena levantar un browser para confirmarlo.
+  # needs: deploy-qa → sólo corre si QA está desplegado y el smoke pasó.
+  # Sin --with-deps ni install del browser: la integración NO lo usa.
+  # ────────────────────────────────────────────────────────────────────────
+  integracion:
+    runs-on: ubuntu-latest
+    needs: deploy-qa
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Integración contra la api de QA
+        env:
+          API_BASE_URL: https://miapp-api-qa.onrender.com
+        run: npx playwright test e2e/api.spec.js --reporter=html
+      - name: Publicar reporte de integración
+        if: always()   # también sube el reporte cuando los tests fallan
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-integracion
+          path: frontend/playwright-report/
+          if-no-files-found: warn
+
+  # ────────────────────────────────────────────────────────────────────────
+  # TP7 §3.4 — E2E: navegador real contra el front de QA
+  # needs: integracion → si la api está rota, este NO llega a correr
+  # (fila 2 de la tabla de §2.5: no se gasta un browser en confirmar
+  # algo que ya sabemos).
+  # SÍ necesita el browser → playwright install --with-deps chromium.
+  # ────────────────────────────────────────────────────────────────────────
+  e2e:
+    runs-on: ubuntu-latest
+    needs: integracion
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: E2E contra el front de QA
+        env:
+          E2E_BASE_URL: https://miapp-front-qa.onrender.com
+        run: npx playwright test e2e/habitos.spec.js --reporter=html
+      - name: Publicar reporte de e2e
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-e2e   # 🔴 nombre DISTINTO del de integración
+          path: frontend/playwright-report/
+          if-no-files-found: warn
+
+  # ────────────────────────────────────────────────────────────────────────
   # TP6 §3.4 — Deploy a PROD detrás del gate humano
   # needs: deploy-qa → PROD solo después de que QA quedó verde.
   # environment: production → el workflow SE PAUSA acá hasta que el
@@ -246,7 +314,14 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────
   deploy-prod:
     runs-on: ubuntu-latest
-    needs: deploy-qa
+    # TP7 §3.4 — needs: e2e (ANTES: deploy-qa). Las 2 suites se interponen
+    # entre QA y PROD. Si cualquiera cae, deploy-prod ni siquiera pide
+    # aprobación — la promoción se frena en QA, que es donde tiene que
+    # frenarse. La integración depende de deploy-qa, la e2e de integración,
+    # y deploy-prod de la e2e: la cadena se lee en los `needs:`.
+    # SIN continue-on-error, SIN if:always(), SIN !cancelled() acá —
+    # cualquiera de los 3 romperia el gate (§3.4 lo prohíbe explícitamente).
+    needs: e2e
     environment: production
     concurrency:
       group: deploy-prod
