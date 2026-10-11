@@ -1377,3 +1377,47 @@ Puedo contestar las 14 preguntas que lista la §Defensa Oral del TP7, en particu
 - **"En tu corrida roja la integración quedó verde y la e2e roja. ¿Qué te dice eso?"** → Fila 1 de la tabla §2.5: se rompió el front — la API está sana. No hace falta leer el código. Lo diagnostiqué con los 2 artifacts del run 38156639924 (reporte verde + reporte rojo con los screenshots). Si hubiera roto la api, la integración hubiera caído primero y la e2e habría quedado SALTADA — fila 2.
 - **"¿Por qué la integración amplia y no la estrecha?"** → Ya tenía QA. Agregar la estrecha habría duplicado infra (Postgres como service del job, migraciones en cada corrida); la amplia es el mismo concepto con un décimo de la configuración. Gano: pruebo también que el despliegue quedó bien. Pierdo: aislamiento (QA es compartido — lo mitigo con nombres únicos y cleanup en finally) y velocidad relativa.
 
+---
+---
+
+# TP8 — Infraestructura como Código
+
+**Peso: 15 % de P2** — y el peso dentro del TP está distinto de la regla general: 25 % configuración + 75 % defensa. Lo que se mide es una sola cosa, y es la defensa: **crear preprod en vivo frente al docente**. Esta sección es deliberadamente corta — la guía la pide así.
+
+## Riel elegido y versiones
+
+- **Terraform v1.16.5** (riel canónico), contra las mismas cuentas de Neon y Render que uso desde TP6/TP7. **No OpenTofu**: la corrida de la cátedra fue sólo con Terraform y el riesgo con providers de terceros vale evitarlo.
+- Providers **fijados por versión** en el bloque `required_providers`:
+  - `kislerdm/neon` **0.18.0** (repo archivado — el oficial `neondatabase/neon` todavía no publicado al 11-10-2026; el `.terraform.lock.hcl` commiteado fija el hash exacto).
+  - `render-oss/render` **1.9.1**.
+- `.terraform.lock.hcl` **sí** se commitea (fija los hashes exactos); el `terraform.tfstate` NO (gitignore) — adentro tiene la contraseña del rol en texto plano (lo verifiqué con `grep -i password terraform.tfstate` después del primer apply).
+- **Entorno nuevo `preprod`** — no toca QA ni PROD (que siguen gobernados a mano desde el TP6). 3 recursos de Neon (project + role + database en proyecto propio `miapp-preprod`) + 2 servicios de Render image-backed con la etiqueta `sha-c37076d...` del `v7.0.0` del TP7. Cadena de conexión **derivada** con `locals.conn` a partir de los outputs reales de Neon → no se copia-pega.
+- **Credenciales**: `NEON_API_KEY`, `RENDER_API_KEY`, `RENDER_OWNER_ID` como env vars de la shell. **Ninguna** en el repo. (Y el `neon_org_id` que agregué como variable es público — aparece en la URL del dashboard; no es secret.)
+
+## Problemas encontrados
+
+- **`org_id is required` (HTTP 400) al crear el proyecto de Neon**. Mi usuario está en una organización ("Test"); el provider pide `org_id` explícito. Fix: `GET /users/me/organizations` con mi API key → `org-dark-glade-67202490`; agregado como `variable "neon_org_id"` con default en `variables.tf`. Es específico de mi cuenta y la guía no lo marca.
+- **`default_branch_id` vs `branch_id`** (lo marca §3.2): copiado de docs vieja da `Unsupported attribute`. Mi `main.tf` usa `neon_project.preprod.default_branch_id` desde el principio.
+- **`history_retention_seconds = 21600`** (6h) — sin esto, el primer apply falla con *"requested history retention seconds exceeds allowed maximum"* (el provider pide 86400 por default y el plan gratuito tope es 21600). Lo marca §3.2.
+- **URLs cambian después del `destroy → apply`** porque Render agrega sufijos random (`-s4g4`, `-nsw0`) cuando "el nombre está libre pero cerca". No es un problema: las URLs **salen de un output** y la cadena de conexión se deriva, no se copia. Lo documento acá para que no sorprenda en la defensa.
+- **Experimento de drift NO detectado** (§3.3): creé una `base_intrusa` por API en el mismo proyecto; `terraform plan` dijo "No changes" porque Terraform **sólo vigila lo que declara**. La borré con la misma mano. Es la lección central del TP y la pregunta de la defensa que suelo mencionar — mi `terraform plan` limpio no dice "no hay nada raro en mi cuenta", dice "lo que yo gobierno está como pedí". Mis QA y PROD (del TP6/TP7) tampoco aparecen en ningún plan mío — están ahí, gastan cuota, invisibles para Terraform.
+
+## Declaración de uso de IA
+
+Mismo esquema que en TP1-TP7: asistente de IA (Claude Opus 4.7 en Claude Code) con supervisión activa.
+
+**Lo que decidí yo**: Terraform (y no OpenTofu), un proyecto Neon aparte (no una base más en el de QA/PROD), proveer `org_id` como variable con default público, dejar `preprod` destruido fuera de sesiones (regla operativa §3.2 — no gastar las 750 hs del workspace), rotar las API keys después del TP (están en el transcript — hay que regenerarlas).
+
+**Lo que ejecutó el asistente bajo mi indicación**: el HCL de `main.tf`, `variables.tf`, `outputs.tf`; los `curl` a la API de Neon para obtener `neon_org_id`; los experimentos de drift (borrar `app_preprod` + crear `base_intrusa` + verificar); los comandos de ciclo de vida (`init`, `plan`, `apply`, `destroy`, `apply`).
+
+**La defensa oral no se delega**. Lo que voy a mostrar en vivo (`terraform apply` de preprod + lectura del plan + `destroy`) lo probé múltiples veces mientras armaba este TP. Las 8 preguntas de la §Defensa Oral las puedo contestar sobre MI repo:
+
+- "Entornos clickeados vs escritos": QA y PROD son clickeados; preprod es escrito. Puedo recrear preprod con un comando; a los otros no.
+- "¿Qué es `(known after apply)`?": el valor lo asigna el proveedor (ids, URLs); Terraform lo deja marcado como pendiente hasta el apply. Honesto, no error.
+- "`destroy` → `apply` dos veces": idempotente — "No changes" la segunda vez. Lo verifiqué.
+- "¿De dónde sale la cadena de conexión?": del `local.conn` que **arma** la URI postgresql:// con los outputs del `neon_role` (name, password) y del `neon_project` (database_host). Y la `BACKEND_URL` del front sale directo de `render_web_service.api.url`.
+- "¿Dónde vive el estado?": en mi máquina (`infra/terraform.tfstate`), gitignored. Adentro: contraseña del rol en texto plano. Si lo perdiera, Terraform propondría crear preprod otra vez contra algo que ya existe.
+- "¿Qué se destruye primero?": el grafo inverso. En mi caso el log mostró `render_web_service.api` → `neon_database` → `neon_role` → `neon_project` (en paralelo con `render_web_service.front`).
+- "¿Qué es drift?": divergencia entre lo declarado y lo real. Terraform refresca y propone converger. Lo probé con el borrado + el apply que recreó la base.
+- "750 horas y el `destroy`": las horas son del WORKSPACE (TP6/TP7 ya consumían 4 servicios × idle); con 6 me paso si dejo todo despierto todo el mes. La disciplina es: destroy cuando no uso.
+

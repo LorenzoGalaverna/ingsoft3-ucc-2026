@@ -15,3 +15,11 @@ Thumbs.db
 .vscode/
 .idea/
 guion-defensa.md
+
+# TP8 — Infraestructura como Código (Terraform)
+# El estado contiene atributos sensibles (passwords, connection strings) en texto plano
+# — nunca al repo. El lock sí se commitea (fija versiones y hashes de los providers).
+infra/*.tfstate
+infra/*.tfstate.*
+infra/.terraform/
+infra/*.tfvars
