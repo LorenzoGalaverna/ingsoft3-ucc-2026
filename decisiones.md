@@ -4,6 +4,39 @@ Este archivo se acumula TP a TP: cada trabajo agrega su sección al final. El m�
 
 ---
 
+## Enlaces del TP7
+
+Todo lo que necesita quien corrige para navegar el TP7 en vivo. Son enlaces afuera del repo (paquetes, URLs) o corridas puntuales entre muchas — si no están acá, no se buscan.
+
+### Entornos desplegados (ejecutando imagen, no reconstruyendo)
+
+- **QA**   → https://miapp-front-qa.onrender.com (api: https://miapp-api-qa.onrender.com)
+- **PROD** → https://miapp-front-prod.onrender.com (api: https://miapp-api-prod.onrender.com)
+
+Los 4 servicios son *Existing Image*: en *Events* de cada uno, el deploy dice "Triggered via Deploy Hook" y nombra el tag `sha-<commit>` de la corrida que lo desplegó — **ninguna reconstrucción**, bit a bit la misma imagen que el pipeline publicó.
+
+### Paquetes públicos etiquetados por commit
+
+- `ghcr.io/lorenzogalaverna/ingsoft3-ucc-2026-backend:sha-c37076dbb834127983b9d627c7df36328f8e04d3`
+- `ghcr.io/lorenzogalaverna/ingsoft3-ucc-2026-frontend:sha-c37076dbb834127983b9d627c7df36328f8e04d3`
+
+Comprobable sin credenciales: `docker logout ghcr.io && docker pull --platform linux/amd64 <URL>`.
+
+### Evidencia obligatoria del gate (§Entregables Tarea 4)
+
+- **Corrida con integración VERDE + e2e ROJA** (deploy-prod frenado) → [run 38156639924](https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/actions/runs/38156639924)
+  - Commit que rompió la app: `f574c195` (PR #36, cambió el texto del botón "Crear hábito" → "Añadir hábito")
+  - Artifacts del run: **`playwright-report-integracion`** (verde) y **`playwright-report-e2e`** (rojo, con screenshots + trazas de los 3 flujos cayendo)
+  - `deploy-prod: completed/skipped` — nunca pidió aprobación: el `needs: e2e` lo paró
+- **Corrida completa en verde posterior** (PR #37, fix) → [run 38157263188](https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/actions/runs/38157263188)
+  - Cadena entera: build-* → deploy-qa → integracion verde → e2e verde → gate humano → deploy-prod verde con la misma imagen `sha-c37076d...`
+
+### Release
+
+- [v7.0.0 — TP7](https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/releases/tag/v7.0.0) — apunta al commit `c37076d`, el que efectivamente está corriendo en PROD. Del tag a la imagen: `git rev-list -n1 v7.0.0` → es el sha de las 2 etiquetas de los paquetes.
+
+---
+
 ## Enlaces del TP6
 
 Todo lo que necesita quien corrige para navegar el TP6 en vivo, en un solo lugar (los paquetes y las URLs viven afuera del repo; las dos corridas son dos entre muchas — si no están acá, no se buscan).
@@ -1045,4 +1078,302 @@ Todo lo que está en esta sección lo puedo explicar. En particular las tres res
 - **"¿Cómo probás que lo que está publicado es exactamente lo que pasó la verificación?"** → No es un control, son 3 encadenados: main protegida por 2 checks required + strict; sólo main publica (if en el evento y la rama); publicar es el último step del job que testea (si algo falla antes, no llega). La cadena se lee en la configuración, no se demuestra con un ejemplo — y no es infalible porque yo, con acceso al repo, puedo publicar a mano.
 - **"¿Por qué QA se despliega solo y PROD no?"** → Porque a QA se le rompe todo el tiempo y está bien (es un entorno para probar). A PROD no se puede llegar sin un humano que mire: (a) el timing de negocio, (b) qué cambia este deploy, (c) que quede registrado quién autorizó.
 - **"PROD está roto tras un deploy aprobado: ¿qué hacés?"** → Curl a los 2 hooks de prod con `&ref=$(git rev-list -n1 v6.0.0)`. Cronometrado hoy: **41 segundos** (con Render cacheando el build de ese commit — en frío esperaría 3-5 min). Y lo que **no** deshace el rollback: los datos que la versión mala escribió, y las migraciones destructivas.
+
+---
+---
+
+# TP7 — Contenedores en el pipeline + integración y e2e
+
+**Peso: 20 % de P2** — el TP termina de cerrar lo que el TP6 dejó mal **a propósito**: hacer que QA y PROD **ejecuten** la imagen que el pipeline publica, en vez de reconstruir desde el repo. Y suma los dos escalones que le faltaban a la pirámide: **integración** (le habla a la api de QA con su base de verdad, sin dobles) y **e2e** (un browser real contra el front de QA). Las dos se convierten en gate de promoción: si cualquiera falla contra QA, PROD **no se toca**.
+
+Como en TP6, los entregables se navegan en vivo. La lista corta está arriba de todo en este archivo, en "Enlaces del TP7".
+
+---
+
+## 1. Build once, deploy many: qué problema del TP6 resuelve la imagen
+
+El TP6 cerraba la cadena hasta "cada entorno recibe el commit verificado" — pero Render **reconstruía** la app desde el repositorio en cada deploy. Lo que corría en QA y PROD no era la imagen que los tests aprobaron: era **otra construcción del mismo commit**. Lo documenté como limitación honesta ahí (§6 de la sección TP6 de este archivo). El TP7 lo arregla.
+
+**El problema concreto, en 2 renglones**: una dependencia transitiva en `npm` puede resolverse a `1.4.3` en el build del pipeline y a `1.4.4` en el build que Render dispara 20 minutos después, porque entre un build y otro el registry publicó un patch. Los dos builds "funcionan" — ninguno rompe. Pero el que QA aprueba y el que PROD corre no son el mismo artefacto. En mi app el riesgo es bajo (lock file commiteado, Node 22-alpine estable), pero la **garantía** no la puedo dar.
+
+**Build once, deploy many** la da como axioma: el pipeline construye la imagen **una sola vez**, con todo adentro (runtime, deps, código), la publica en ghcr con una identidad única (`sha-<commit>`), y los entornos la **ejecutan tal cual**. QA y PROD corren **el mismo binario**, no 2 builds "parecidos". Esto es:
+
+- **Reproducibilidad**: el deploy deja de depender de "cómo salga el build de hoy".
+- **Promoción real**: promover = decirle a PROD "ejecutá la imagen `X`" — la misma `X` que QA verificó.
+- **Rollback directo**: volver = ejecutar la imagen anterior, que sigue en el registry intacta (el `sha-<commit>` nombra lo mismo hoy y mañana).
+
+En mi pipeline del TP7, los 2 jobs de deploy disparan el hook con `--data-urlencode "imgURL=ghcr.io/.../-{backend,frontend}:sha-${{ github.sha }}"`. **El mismo `IMG_API` y `IMG_FRONT`** se construyen con el mismo `github.sha` en los 2 jobs (`deploy-qa` y `deploy-prod` del mismo run), así que la imagen que QA verifica es byte-por-byte la que PROD ejecuta. No queda a interpretación: se lee en el YAML.
+
+---
+
+## 2. Estrategia de etiquetas: `sha-<commit>` + `v7.0.0`, por qué NO `latest`
+
+Dos sistemas de nombres para dos cosas distintas:
+
+### `sha-<commit>` en el registry
+
+Mi pipeline publica una sola etiqueta por imagen: `sha-<los 40 caracteres del commit>`. Lo que garantiza:
+
+- **Trazabilidad exacta**: cada imagen apunta al commit de git que la produjo. Dado un `sha-c37076dbb834127983b9d627c7df36328f8e04d3`, puedo hacer `git show c37076d` y ver el código exacto que se construyó.
+- **Promoción identificable**: cuando `deploy-prod` manda `imgURL=...:sha-c37076d...` al hook, el aprobador puede verificar que es el mismo SHA que QA aprobó. Si no coincide, no se aprueba.
+- **Rollback estable**: el tag es inmutable **por convención del pipeline** (nadie reescribe el commit después de mergeado). Si un día alguien republica un tag `sha-<X>` moviéndolo a otra imagen, mi cadena queda rota en silencio. El digest `@sha256:…` sería inmutable **por criptografía**, pero no lo uso porque se conoce recién después del build y habría que pasarlo entre jobs. §2.2 del TP7 lo menciona como opción; en TP8/TP9 podría cerrarlo.
+
+### `v7.0.0` en git
+
+Es el tag anotado del práctico. Apunta a **un commit** —el que efectivamente está corriendo en PROD—, no al último de main. Lo pusieron a mano (`git tag -a v7.0.0 $SHA_PROD`) después de que PROD quedó verde. No es una versión de producto SemVer: es un marcador de **"cierre del TP7"** que la cátedra fija por regla (TP6 → v6.0.0, TP7 → v7.0.0, …).
+
+### Por qué mi pipeline NO publica `latest`
+
+`latest` es un **puntero**, no una versión. Hoy apunta a una cosa, mañana a otra. Si un día alguien configurara un servicio para desplegar `latest`, estaría desplegando "lo último que se publicó" sin poder decir qué es eso. Rompe las 3 propiedades de arriba:
+
+- **Sin trazabilidad**: no se puede ir de `latest` al commit.
+- **Promoción ambigua**: QA verifica una cosa, PROD ejecuta otra si el `latest` se movió entre un deploy y otro.
+- **Rollback imposible**: ¿a qué `latest` vuelvo? Al de ayer. ¿Y el de ayer era qué? No sé.
+
+Con una sola etiqueta por imagen (la del commit), no hay forma de desplegar algo sin decir exactamente qué es. Es la disciplina que el TP6 §3.0 empezó y el TP7 §2.2 consolida.
+
+### Con qué imagen configuré los servicios de Render — y por qué NO es la que corre
+
+Cuando pasé los 4 servicios a *Existing Image* el 2026-10-11, les cargué la URL de la imagen del **último merge disponible en ese momento**: `sha-627549a2bcfb120a44573e3c02ec8f7e5de34c9a`. Esa es la que aparece hoy en *Settings → Image* de los 4 servicios.
+
+**Pero NO es la que está corriendo**: Render exige una imagen válida al configurar la fuente, pero después cada deploy del pipeline cambia la que ejecuta vía `imgURL=`. Hoy PROD corre `sha-c37076d...` (el commit del v7.0.0). *Settings* sigue clavada en `sha-627549a...` — el placeholder de configuración vs. el runtime actual son dos cosas distintas, y es importante saber cuál mira cada quién.
+
+**Trampa documentada en §3.2 del TP7**: si alguien tocara el botón *Manual Deploy*, Render dispararía un deploy usando lo que figura en *Settings → Image* — es decir, revertiría a `sha-627549a...` sin avisar y en verde. **Nunca se toca**: el deploy sólo sale del pipeline. Si pasa, se recupera re-disparando el hook del commit correcto desde la corrida.
+
+### Qué hice con los servicios viejos
+
+Cambié la fuente de los 4 existentes (no creé nuevos). Preservó URLs, deploy hooks, environment vars y el historial. Un servicio nuevo habría obligado a actualizar 4 secrets de GitHub, 2 `BACKEND_URL` del front, 4 URLs de smoke test y 2 `E2E_BASE_URL` — y a borrar los viejos antes de que me consumieran la cuota del free tier (750 hs del workspace). Lo que §3.2 permite, lo que la economía recomienda.
+
+---
+
+## 3. Del tag `v7.0.0` a la imagen, en un paso
+
+```bash
+git rev-list -n1 v7.0.0
+# → c37076dbb834127983b9d627c7df36328f8e04d3
+
+# Esa cadena es la etiqueta que vive en los dos paquetes:
+docker pull --platform linux/amd64 \
+  ghcr.io/lorenzogalaverna/ingsoft3-ucc-2026-backend:sha-c37076dbb834127983b9d627c7df36328f8e04d3
+
+docker pull --platform linux/amd64 \
+  ghcr.io/lorenzogalaverna/ingsoft3-ucc-2026-frontend:sha-c37076dbb834127983b9d627c7df36328f8e04d3
+```
+
+Es mi "catálogo de versiones con binarios de verdad": cada release de git tiene **la** imagen que está corriendo en PROD en ese momento, trazable sin ambigüedad.
+
+---
+
+## 4. Cómo se comprueba desde afuera que un entorno **ejecuta** la imagen
+
+Dos lugares complementarios:
+
+### En Render → Events de cada servicio
+
+Cada deploy registra una línea que incluye:
+- `Deploy live for <digest-short>` — el short del hash sha256 de la imagen (ej. `7dd1e48`).
+- La **etiqueta de la imagen**: `sha-c37076dbb834127983b9d627c7df36328f8e04d3` — el commit que la produjo.
+- `Triggered via Deploy Hook` — significa que no fue un rebuild interno ni un *Manual Deploy*; el hook del pipeline lo disparó.
+
+Antes del TP7, cuando los servicios construían desde el repo, *Deploy live for* mostraba el short del commit (ej. `627549a: fix: …`). Ahora muestra el **digest de la imagen** — ese cambio visual es la señal de que el servicio ejecuta la imagen, no la construye. Lo verifiqué entrando a cada servicio después del primer deploy del TP7.
+
+### En el pipeline → logs del paso de deploy
+
+El step de `deploy-qa` y `deploy-prod` imprime la respuesta del hook:
+```
+{"deploy":{"id":"dep-db5r1k7lk1mc73aunlq0"}}
+```
+Y si yo pasara una imagen mal formada o inexistente, Render responde `400` con *"unable to fetch image with provided input"*. Con el `curl -f` del step, el job cae y el pipeline queda rojo. **No hay forma de desplegar algo que el registry no tiene**.
+
+### Qué NO alcanza a probar el smoke
+
+El smoke test (`/health`, `/api/habits`, `/` del front) verifica que el entorno **responde**. **No verifica que esté ejecutando mi imagen**: si el deploy fallara, Render sigue sirviendo la versión anterior y el smoke da verde contra la vieja. Esto lo cerrará TP7 §2.4 recién **en TP8**: que el `/health` devuelva el commit incrustado al build con un `ARG` + `build-args` del pipeline, y que el smoke lo compare con `github.sha`. Hoy ese chequeo lo hago yo, a mano, en Events — es la limitación honesta que la guía explicita.
+
+---
+
+## 5. Qué flujos elegí — y por qué ésos
+
+### Integración (`frontend/e2e/api.spec.js` — contra la api de QA, sin navegador)
+
+1. **alta + verificación + borrado** (requerida): ciclo CRUD completo. Es el flujo que debe andar siempre: si una línea de este test se rompe, no se puede crear hábitos — la app está muerta.
+2. **alta inválida: nombre vacío → 400** (requerida): confirma que la validación del backend (en `validadores.js`) está conectada al endpoint, y que la base no cambió.
+3. **completar 2 veces el mismo día → 409 (regla UNIQUE de la BD)** _(elegida)_. Es la prueba que **justifica el escalón de integración**: ejercita el `@@unique([habitId, dayKey])` del schema de Prisma. Un unit test del TP5 con `vi.mock('@prisma/client')` sigue verde si alguien saca ese índice de una migración (el mock no tiene columnas, acepta todo). Este test **se pone rojo**. Es exactamente "lo que el doble no ve" del §2.5.
+
+### E2E (`frontend/e2e/habitos.spec.js` — Chromium real contra el front de QA)
+
+1. **crear → verlo listado → borrar → desaparece** (requerida): CRUD visible. Prueba que el formulario, la lista y el botón de borrar hablan entre sí **a través de la red**. Si el nginx del front olvida proxear `/api`, si el backend está dormido, si Vite construyó mal el bundle — rojo.
+2. **nombre vacío → botón "Crear hábito" deshabilitado** (requerida): validación visible al usuario. El backend también la hace (test 2 de integración), pero el usuario la ve **antes** del envío.
+3. **completar un hábito suma su XP al usuario** _(elegido)_. Es el flujo **core** de la gamificación: si no suma XP, la app pierde su razón de ser. Elegí éste porque **toca la base** (crea un `Completion`, actualiza `user.xp` y `user.level`), **toca el navegador** (el usuario clickea "Completar" y ve el número cambiar), y es el camino que **vendría a reclamar un usuario de verdad** si dejara de andar.
+
+**Quién me escribe si se rompen**: yo mismo, porque la app es personal. En un equipo real, los 3 flujos son el "camino crítico diario del usuario" — crear/listar/borrar hábitos y completar uno. Si alguno se rompe, la app no sirve.
+
+### Qué NO puse (y por qué — pirámide)
+
+- **No puse 15 flujos e2e de "editar hábito", "cambiar nombre", "ordenar por XP"**. La e2e es la capa cara y lenta de la pirámide. Cuantos más flujos, más tiempo tarda cada corrida y más chances de que uno de más sea flaky (uno sólo basta para que el equipo deje de confiar en el gate). Pocos y críticos.
+- **No puse en integración "verificar que la cadena de conexión está bien formada"**. Eso lo probaría un unit test del parser de la URL (si tuviera), o se cubre indirecto porque si está mal, la BD no responde y los 3 tests de integración caen. Duplicar no suma.
+- **No puse unit tests para App.jsx** (lo documenté en el `include` del coverage del TP5). Los componentes React se testean mejor con integración y e2e; un unit test con `render` + `vi.mock(fetch)` tiene mucho setup y poco assert honesto. Lo que sí hice fue extraer la lógica (`xp.js`, `api.js`) y testear eso puro.
+
+---
+
+## 6. Qué pruebo en integración vs e2e — y por qué no es lo mismo
+
+Mi corrida roja (run 38156639924) con la integración verde y la e2e roja prueba la fila 1 de la tabla del §2.5 del TP7:
+
+| integración | e2e | Qué se rompió |
+|---|---|---|
+| 🟢 | 🔴 | **El front: la API está sana, pero la pantalla no la usa bien** ← mi caso |
+| 🔴 | ⬜ saltada | La API o la base: el front no llega ni a tener la chance |
+| 🟢 | 🟢 | Nada de lo que estos dos ven |
+
+El commit `f574c195` cambió **una palabra** en el front (el texto del botón "Crear hábito" → "Añadir hábito"). La API no se tocó: el endpoint `POST /api/habits`, el validador, el schema de Prisma — todo igual. Entonces:
+
+- Mi integración **(verde)** sigue haciendo `POST /api/habits` con `data: { name: ..., xpReward: 10 }` y obtiene `201` + hábito creado. **No ve** que el botón del front cambió de nombre — porque ni abre un navegador.
+- Mi e2e **(roja)** busca `page.getByRole('button', { name: 'Crear hábito' })`. Ese botón ya no existe. Tras 15 s de `expect.timeout`, cae con `TimeoutError`. Los 3 flujos usan ese botón → los 3 caen.
+
+**Y por qué no hizo falta leer el código para saber quién se rompió**: la tabla sola lo dice. Fila 1 → el front. Si yo hubiera roto la api (ej. renombrar `/api/habits` a `/api/habitos`), estaría en la fila 2: integración ROJA y la e2e quedaría SALTADA (porque `needs: integracion`). Es la economía de la pirámide — no se gasta un browser en confirmar algo que la capa de abajo ya dijo.
+
+**El gate del pipeline**: ante este diagnóstico, `deploy-prod` ni siquiera pide aprobación — el `needs: e2e` lo frena. En el run 38156639924 se lee: `deploy-prod: completed/skipped`. **PROD sigue con la versión anterior intacta** (el `c37076d` del post-fix no estaba aún, PROD tenía `bb40652`). Yo, humano, nunca llegué al modal de approve.
+
+---
+
+## 7. Integración **amplia** vs estrecha — qué elegí y qué pierdo
+
+La guía §2.5 📌 explicita 2 formas:
+
+- **Estrecha**: `WebApplicationFactory` (en el stack .NET) o `supertest + app.listen(0)` + un Postgres como `services:` del job → la api se arma **adentro** del pipeline, con una base descartable que nace y muere con la corrida.
+- **Amplia** (la que usé): la api **ya desplegada** en QA, con la **misma base** de QA.
+
+**Elegí la amplia por tres razones**:
+
+1. **Ya tenía QA**. Agregar la estrecha habría significado duplicar la infra: un segundo Postgres (como `services:`), configurar su `DATABASE_URL`, correr migraciones de Prisma en cada corrida, levantar Node con el schema aplicado. En vez de eso, mis tests le hablan a `https://miapp-api-qa.onrender.com` — una línea de `env` y nada más.
+2. **Prueba también que el despliegue quedó bien**. Si el deploy a QA fallara (DNS cambió, env var mala, imagen rota), mi integración lo detecta. La estrecha no — se armaría igual que siempre, aunque QA estuviera caído.
+3. **Es el mismo concepto, con un décimo de la configuración**. Mi test habla con una api real que tiene una base real detrás. Lo que falla, falla igual que en la estrecha.
+
+**Qué pierdo**:
+
+- **Aislamiento**: QA es compartido entre todas mis corridas. Cada test crea un hábito con nombre único (`int-alta-${Date.now()}`) y lo borra en el `finally` — pero si una corrida se cae en el medio, deja basura. La paliación: nombres irrepetibles + `finally` siempre borra. La contrapartida real: si otro desarrollo tocara los mismos datos de usuario (el user id = 1 hardcoded del walking skeleton), podrían pisarse. En multiusuario esto se arregla con un user propio por corrida.
+- **Velocidad relativa**: la estrecha tarda milisegundos (todo in-memory). La amplia tarda ~7s para 3 tests contra Render. Para 3 tests está perfecto; para 300 habría que ir a la estrecha.
+- **Requiere la nube**: si Render se cae, mi integración no corre. Es un riesgo real del free tier.
+
+Para mi app y el alcance del TP, la amplia es la elección correcta. Si la suite creciera a 50 tests, migraría la mayoría a la estrecha y dejaría 5-10 en la amplia como "smoke de integración de verdad".
+
+---
+
+## 8. Cold start del free tier + flaky
+
+### Cómo lo manejo en la config de Playwright
+
+```js
+timeout: 60_000,            // 1 min por test — generoso para e2e con cold start, de sobra para api
+expect: { timeout: 15_000 }, // 15s por assertion — no lo hereda del de arriba (default 5s)
+retries: 1,                  // 1 retry absorbe una demora suelta
+```
+
+Y en el pipeline: el **smoke** del `deploy-qa` (que corre antes de la integración) **despierta QA** con 30 reintentos × 20s. Para cuando la integración arranca, los contenedores están tibios. Entonces mis timeouts generosos son para absorber **picos puntuales** (un pedido más lento, un GC inesperado), no cold starts enteros — eso lo paga el smoke.
+
+### Qué es un test flaky y por qué es peor que no tener test
+
+Un test flaky es uno que a veces pasa y a veces falla **sin que el código bajo test haya cambiado**. Es la peor categoría porque:
+
+- **Si falla**: el equipo lo marca como "flaky conocido" y aprende a ignorar el rojo. La próxima vez que falle por una razón **real** (un bug introducido), nadie lo mira.
+- **Si pasa**: nadie se preocupa. Pero el bug sigue adentro de la suite — es una red con un agujero que se abre a veces.
+
+Un test que no existe me obliga a revisar manualmente. Un test flaky me da falsa seguridad. **Preferible no tener que tener uno flaky**.
+
+### Cómo mi config evita fabricarlos
+
+- `retries: 1` + reporte de "flaky": si un test pasa en el reintento, Playwright lo marca como flaky (verde con asterisco) en el reporte HTML. **La corrida queda verde**, pero yo veo el flaky y lo miro. Si pasa dos veces seguidas, ya no es la red: es el test. Se arregla.
+- **No uso `page.waitForTimeout(5000)` en ningún lado**. Esperas explícitas: `await expect(fila).toBeVisible()` espera a que el elemento aparezca (hasta 15s). Es el patrón que la guía §2.6 marca como el que **no** fabrica flakies.
+- **Nombres de datos con `Date.now()`**: si dos corridas simultáneas crean un hábito, no chocan. No tengo "race flakies" por nombres compartidos.
+- **Cleanup en `finally`**: aunque el assert falle, los datos de prueba se limpian. No dejo residuo que haga fallar a la próxima corrida.
+
+---
+
+## 9. Cómo logré que la MISMA imagen del front sirva en QA y en PROD
+
+El patrón ya venía del TP6, pero el TP7 lo **convierte en requisito funcional**: si la imagen fuera distinta entre entornos, no sería "la misma imagen que verifiqué".
+
+### Lo que queda **adentro** de la imagen del front
+
+- Los estáticos de Vite (`dist/index.html`, los bundles JS/CSS con hash en el nombre).
+- La imagen base `nginx:alpine`.
+- La **plantilla** `default.conf.template` en `/etc/nginx/templates/` (TP6 §3.3). Esa plantilla usa `${BACKEND_URL}` y `${DNS_RESOLVER}` sin valores concretos.
+- Los defaults del `ENV` del Dockerfile: `BACKEND_URL=http://backend:8080` y `DNS_RESOLVER=127.0.0.11` — pensados para que `docker compose up` local siga funcionando sin tocar nada.
+
+### Lo que llega **de afuera** (environment vars del servicio en Render)
+
+- `BACKEND_URL` → la URL **pública** de la api de ese entorno. En `miapp-front-qa` es `https://miapp-api-qa.onrender.com` (sin barra final — con ella, nginx manda todo a `/` y cada `/api/*` da 404). En `miapp-front-prod` es `https://miapp-api-prod.onrender.com`.
+- `DNS_RESOLVER` → `8.8.8.8` en los dos fronts (Render no tiene DNS interno de nombres de servicio como compose).
+
+Al arrancar, la imagen de nginx corre `envsubst` sobre `/etc/nginx/templates/*.template`, reemplaza `${BACKEND_URL}` y `${DNS_RESOLVER}` por los valores del env, y deposita el conf final en `/etc/nginx/conf.d/`. **La misma imagen** `sha-c37076d...` se materializa en:
+
+- QA: nginx proxea `/api/*` a `https://miapp-api-qa.onrender.com`
+- PROD: nginx proxea `/api/*` a `https://miapp-api-prod.onrender.com`
+
+Lo único que las distingue son 2 variables. Si el `BACKEND_URL` estuviera horneado adentro, necesitaría 2 imágenes (una para QA, una para PROD) — y el principio "la misma imagen que verifiqué" se quiebra.
+
+---
+
+## 10. Problemas encontrados y cómo los resolví
+
+### a) Comando `curl --data-urlencode` con la URL del hook — el orden importa
+
+En `curl -fsS --max-time 30 --get --data-urlencode "imgURL=$IMG_API" "$HOOK_API"`, la URL del hook va **al final**. Si la pongo primero (como estoy acostumbrado), `--data-urlencode` toma la cadena de al lado como su valor (porque es lo único "suelto" después de la bandera) y la URL que yo quería no se usa. En el shell interactivo probé la variante errada una vez y el `curl` tiraba `curl: (3) URL rejected: Bad hostname` o similar. Lo dejé con comentario en el YAML — la próxima vez a cualquiera que vea el paso le queda claro por qué el orden es ese.
+
+### b) Vitest matcheaba los specs de Playwright por default
+
+Los dos usan `*.spec.js`. Si no lo excluis, vitest intenta correr `e2e/api.spec.js` y explota con `You are calling test() from an async test.describe() block` — el `test()` es el de Playwright, vitest no lo reconoce. Peor: el error pondría **rojo el `build-frontend`** y la cadena entera cae.
+
+**Fix** (en `vite.config.js`): `exclude: [...configDefaults.exclude, 'e2e/**']`. Importa también `configDefaults` de `vitest/config` para no perder los excludes default (`node_modules/`, `dist/`, etc.).
+
+### c) El selector del botón de borrar — tema de accesibilidad real
+
+Mi App.jsx tenía `aria-label="borrar hábito"` **fijo** en el botón de borrar de cada fila. Con 2 hábitos en pantalla, `page.getByRole('button', { name: 'borrar hábito' })` encuentra 2 elementos y Playwright falla con `strict mode violation`. La guía §3.3 lo flagea explícitamente: si tu e2e no encuentra el botón único, es porque tu app tiene **un problema de accesibilidad real** — no es un límite de Playwright.
+
+**Fix**: aria-label dinámico — `aria-label={\`borrar ${h.name}\`}`. Mejora la accesibilidad de la app (un lector de pantalla ahora dice "borrar correr 30 min" en vez de "borrar hábito, borrar hábito, borrar hábito"), y hace que `getByRole('button', { name: \`borrar ${nombre}\` })` encuentre exactamente uno. Lo mismo con el botón "Completar".
+
+### d) El `imgURL` con tag abreviado — error silencioso que no sucedió
+
+Esta no me pasó pero la guía lo advierte y vale documentar: si `imgURL=...:sha-c37076d` (7 chars, el que te muestra git log por default), Render contesta `400 unable to fetch image with provided input`. Mi pipeline usa `sha-${{ github.sha }}` que son los 40 chars completos — no me afecta. Pero si alguien copiara el short para debuggear a mano, el error no dice qué está mal. Lo dejé anotado en el YAML.
+
+### e) El revert del gate rojo — hay que hacerlo YA
+
+Después de capturar la evidencia del gate rojo (run 38156639924), **main quedó con el commit `f574c195`** que tiene la app rota (el botón se llama "Añadir hábito" y las e2e se caen). Hasta que yo mergeé el fix (PR #37) y aprobé el deploy, cualquier otro cambio que mergeara habría arrastrado esa rotura y las e2e seguirían fallando. Lesson: después del gate rojo, el fix va enseguida.
+
+---
+
+## 11. Declaración de uso de IA
+
+Mismo esquema que en TP1-TP6: asistente de IA (Claude Opus 4.7 en Claude Code) con supervisión activa. Como en TP6, la mitad del trabajo se hizo en UIs externas donde la IA no entra — Render (cambio de fuente a *Existing Image*, env vars, Events), y el gate humano de GitHub (approve/reject con criterio). La línea entre "yo" y "asistente" vuelve a ser nítida.
+
+### Lo que decidí y controlé
+
+- **Las dos decisiones críticas** del TP7, formuladas al asistente como opciones concretas: Playwright vs Cypress (elegí Playwright porque la guía está escrita sobre él y es equivalente), y cambiar la fuente de los 4 servicios de Render vs crear 4 nuevos (elegí cambiar fuente — preserva URLs, hooks, env vars, no requiere actualizar nada downstream).
+- **Los 3 tests de integración y los 3 flujos e2e**. El `tercer test de integración` (completar 2 veces → 409) lo elegí yo con la justificación concreta: es el único test que ejercita el `@@unique` del schema, que un mock de Prisma NO puede atrapar. El `tercer flujo e2e` (completar + ver XP subir) lo elegí porque toca la base + el navegador + la regla de dominio core.
+- **El cambio de la aplicación para la evidencia del gate rojo** (PR #36). Elegí romper el texto del botón "Crear hábito" porque: (a) es un cambio real que las e2e **podrían** querer detectar (es un rename, puede ser un bug de traducción); (b) la API no cambia → integración queda verde (fila 1 de la tabla §2.5); (c) los 3 flujos e2e tocan ese botón → los 3 caen de forma clara. El diff es de 1 línea en `src/App.jsx`, no en `e2e/`.
+- **Cuándo mergear PR #36 (gate rojo) vs cuándo mergear PR #37 (fix)**: respeté el consejo de la guía — la rotura **tenía** que estar en main (no en PR) para que el run con la e2e roja fuera visible, y el fix inmediatamente después para no dejar PROD descolgado.
+- **La decisión de cada aprobación/rechazo del gate humano**: entré a la UI, verifiqué el commit del run, chequee visualmente QA, y aprobé. Los errores de UI que había tenido en TP6 (cancelé una vez, aprobé una vez cuando quería rechazar) no se repitieron en TP7 — práctica muscular.
+- **El motivo del rollback del tag `v7.0.0`**: el commit del PR #37 (fix) es el que efectivamente está corriendo en PROD. El tag apunta a ese. Esta vez el tag y PROD coinciden exactamente — a diferencia del TP6, donde quedaron desfasados un commit por mergear docs después (lo documenté ahí mismo).
+
+### Lo que ejecutó el asistente (bajo mi indicación)
+
+- La escritura del `ci.yml` nuevo (jobs `integracion` y `e2e`, cambio del `imgURL`, cambio del `needs:` de `deploy-prod`). Puedo explicar cada línea.
+- Los 6 specs de Playwright (3 integración + 3 e2e), siguiendo las reglas que fija el §Entregables (nombres únicos con `Date.now()`, cleanup en `finally`, afirmar sobre el dato propio).
+- Las mejoras de accesibilidad del `App.jsx` (aria-label en el input de nombre, aria-labels dinámicos en los botones de la fila).
+- La refactorización de `playwright.config.js`, el `vite.config.js` con el `exclude`, el `.gitignore` con `playwright-report/` y `test-results/`.
+- Los comandos para el tag `v7.0.0` y la release.
+- La redacción inicial de esta sección; la revisé entera porque los razonamientos (pirámide, integración amplia vs estrecha, qué prueba cada capa) son literalmente lo que voy a decir en la mesa de P2.
+
+### Lo que vino dado por el enunciado
+
+Que la unidad de release sea una imagen inmutable; que QA y PROD ejecuten la misma; que haya 2 suites como gate antes del humano; que haya evidencia de un gate rojo provocado rompiendo la app (no el test); que el tag sea `v7.0.0`. Todo en §Entregables.
+
+### La defensa oral no se delega
+
+Puedo contestar las 14 preguntas que lista la §Defensa Oral del TP7, en particular las 4 más críticas:
+
+- **"¿Qué significa build once, deploy many y qué problema del TP6 resuelve?"** → En TP6 Render reconstruía desde el repo en cada deploy; 2 builds del mismo commit pueden resolver dependencias distintas → QA y PROD no eran byte-por-byte iguales. Ahora el pipeline construye **una vez**, publica el `sha-<commit>`, y QA + PROD ejecutan la misma imagen vía `imgURL`.
+- **"En Render configuraste cada servicio con una imagen vieja: ¿es ésa la que corre ahora?"** → No. *Settings → Image* tiene `sha-627549a...` (el primer merge que configuré). Lo que corre es `sha-c37076d...` (lo que el pipeline desplegó por último). Lo sé sin entrar al panel: `gh api .../deployments?environment=production` devuelve `c37076d` y las etiquetas de los 2 paquetes de ghcr también. Si alguien tocara *Manual Deploy*, PROD retrocedería a `sha-627549a` (trampa documentada).
+- **"En tu corrida roja la integración quedó verde y la e2e roja. ¿Qué te dice eso?"** → Fila 1 de la tabla §2.5: se rompió el front — la API está sana. No hace falta leer el código. Lo diagnostiqué con los 2 artifacts del run 38156639924 (reporte verde + reporte rojo con los screenshots). Si hubiera roto la api, la integración hubiera caído primero y la e2e habría quedado SALTADA — fila 2.
+- **"¿Por qué la integración amplia y no la estrecha?"** → Ya tenía QA. Agregar la estrecha habría duplicado infra (Postgres como service del job, migraciones en cada corrida); la amplia es el mismo concepto con un décimo de la configuración. Gano: pruebo también que el despliegue quedó bien. Pierdo: aislamiento (QA es compartido — lo mitigo con nombres únicos y cleanup en finally) y velocidad relativa.
 
