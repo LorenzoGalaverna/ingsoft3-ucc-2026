@@ -93,11 +93,11 @@ export default function App() {
                 <button
                   onClick={() => completeHabit(h.id)}
                   disabled={h.completedToday}
-                  aria-label={h.completedToday ? 'ya completado hoy' : 'completar'}
+                  aria-label={h.completedToday ? `${h.name} ya completado hoy` : `Completar ${h.name}`}
                 >
                   {h.completedToday ? '✓ Hecho' : 'Completar'}
                 </button>
-                <button className="link" onClick={() => deleteHabit(h.id)} aria-label="borrar hábito">
+                <button className="link" onClick={() => deleteHabit(h.id)} aria-label={`borrar ${h.name}`}>
                   borrar
                 </button>
               </div>
@@ -113,6 +113,7 @@ export default function App() {
             value={name}
             onChange={e => setName(e.target.value)}
             placeholder="Ej: correr 30 min"
+            aria-label="Nombre del hábito"
           />
           <input
             type="number"
