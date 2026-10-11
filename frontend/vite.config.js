@@ -1,8 +1,12 @@
 import { defineConfig } from 'vite';
+import { configDefaults } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
 // Config unificada para Vite (dev/build) y Vitest (tests + coverage).
 // El umbral del TP5 se define acá — mismos 70% que en el backend, sobre lines Y branches.
+// TP7: el `exclude` evita que vitest intente correr los specs de Playwright
+// (que viven en e2e/) — por default vitest matchea *.spec.js y explota con un
+// error críptico porque Playwright usa su propia API de test.
 export default defineConfig({
   plugins: [react()],
   server: {
@@ -14,6 +18,7 @@ export default defineConfig({
   },
   test: {
     include: ['src/**/*.test.js', 'src/**/*.test.jsx'],
+    exclude: [...configDefaults.exclude, 'e2e/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'text-summary', 'json-summary', 'html', 'lcov'],
