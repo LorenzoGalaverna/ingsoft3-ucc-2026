@@ -1,0 +1,31 @@
+# TP9 §3.1 — Vigilancia continua de dependencias.
+#
+# Dependabot escanea cada ecosistema contra la base de vulnerabilidades
+# conocidas (CVEs) + propone PRs de actualización. Es el escaneo SCA
+# (Software Composition Analysis) de GitHub.
+#
+# 3 ecosistemas: npm del backend, npm del frontend, y las propias actions
+# del pipeline (que también son dependencias — pinned a @vN pero no @hash).
+#
+# Dependabot lee este archivo desde la rama DEFAULT del remoto: tiene que
+# estar mergeado a main para que haga algo.
+
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+
+  # Las actions pinned a @v4/@v6/@v7 reciben parches con el mismo tag ("version
+  # tags mutables") — eso trae automáticamente las revisiones de la major. Lo
+  # que Dependabot propone son los saltos de major (v4 → v5).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
