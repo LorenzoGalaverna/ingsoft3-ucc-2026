@@ -1421,3 +1421,111 @@ Mismo esquema que en TP1-TP7: asistente de IA (Claude Opus 4.7 en Claude Code) c
 - "¿Qué es drift?": divergencia entre lo declarado y lo real. Terraform refresca y propone converger. Lo probé con el borrado + el apply que recreó la base.
 - "750 horas y el `destroy`": las horas son del WORKSPACE (TP6/TP7 ya consumían 4 servicios × idle); con 6 me paso si dejo todo despierto todo el mes. La disciplina es: destroy cuando no uso.
 
+---
+---
+
+# TP9 — DevSecOps + Observabilidad + Continuous Feedback
+
+**Peso: 15 % de P2** — cierra el bloque. Shift-left (seguridad en el pipeline), observabilidad (ver qué pasa adentro desde afuera), y continuous feedback (dato de PROD → próximo PLAN). Igual que TP8, la nota se parte 25 % técnico + 75 % defensa en vivo.
+
+## PR de Dependabot que mergeé
+
+**PR #41** → `chore(deps): bump proxy-addr from 2.0.7 to 2.0.8 in /backend` (patch bump, dep transitiva de Express).
+
+**Qué actualizaba**: parche de seguridad crítico — fix de [CVE-2026-90711](https://www.cve.org/CVERecord?id=CVE-2026-90711) (`GHSA-jqcg-44mw-7w3h`), severidad **critical** marcada por GitHub. `proxy-addr` es la lib que Express usa para resolver `X-Forwarded-For` cuando corre detrás de un proxy — exactamente mi caso (Render pone un proxy delante del container).
+
+**Por qué me animé a mergearlo**:
+- Es un bump de **patch** (SemVer): sólo arregla, no agrega features ni rompe API.
+- Mi CI estaba verde sobre el PR — y verde significa **toda mi red del semestre**: unit tests (TP5), coverage ≥ 70 % (TP5), docker build (TP2+TP7), publicación de imagen (TP7). Sin esa red el update sería un salto al vacío; con ella es un click de confianza. Es exactamente el argumento del TP9 §2.2: "todo tu semestre es lo que te permite mergear un update de dependencia con confianza en minutos".
+- El changelog upstream (jshttp/proxy-addr) sólo lista fixes y mejoras internas — ningún breaking change.
+- Decidí **rechazar prod** en el deploy de este PR y mandar el fix a PROD junto con el PR siguiente (#44, Sentry) — para no gastar un ciclo entero de build de Render por una dep transitiva que ya se validó en QA. El commit `c059505` llegó a PROD vía el merge siguiente que incluía todo.
+
+## Monitor UptimeRobot — tiempo de aviso
+
+- URL monitoreada: `https://miapp-api-prod.onrender.com/health`
+- Intervalo: 5 min (default free)
+- Alerta: email a mi contacto por default
+
+**Caída provocada el 2026-10-18**:
+- **10:39** — Suspend del servicio `miapp-api-prod` en Render (*Settings → Suspend Web Service*).
+- **10:43** — Email DOWN de UptimeRobot → **tiempo de detección = 4 minutos** (el mínimo teórico para un intervalo de 5 min + confirmación).
+- Resume del servicio en Render + warm-up del `/health` con un `curl` (porque Render tarda ~40 s en despertar post-suspend, y el UP no se marca hasta que responda 200).
+- **10:58** — Email UP → tiempo visto por el monitor **4 min después del warm-up**. Downtime total registrado: **15 minutos** (10:43 → 10:58).
+- Monitor **pausado** inmediatamente al terminar (§3.4 — las 750 hs del workspace de Render se comparten con QA/PROD; un monitor cada 5 min mantiene el servicio despierto 24/7 y mandaría a PROD al límite).
+
+**Cómo me habría enterado SIN el monitor**: por un mensaje de un usuario (en la app chica, probablemente yo mismo al abrir el browser). "Un sábado la app estuvo caída 40 minutos sin que nadie supiera" es exactamente el escenario que motiva este TP.
+
+## Operación más usada y más lenta — del dato a la tarjeta
+
+Después de instrumentar Sentry en back + front (PR #44, commit `835ce23`) y usar la app un rato:
+
+| Métrica | Dato | Interpretación |
+|---|---|---|
+| Operación **más usada** | `GET /api/habits` (7 pedidos en el intervalo) | Es el request que carga la pantalla principal — se dispara en cada abrir la app. |
+| Operación **más lenta** | `GET /api/habits` **p95 ≈ 1030 ms** | Mismo endpoint. El primer request después del cold start de Render tarda ~3.3 s; los subsecuentes bajan a ~128 ms. El p95 lo domina el primer pedido tras idle. |
+| Issue capturado | [HABIT-TRACKER-BACKEND-1](https://innexio-zd.sentry.io/issues/HABIT-TRACKER-BACKEND-1) — `Error: Falla de prueba del TP9` | Del endpoint temporal `GET /api/falla` que agregué en §3.5. Llegó a Sentry con stack trace completo + culprit `GET /api/falla`. |
+
+**Tarjeta en el Project del TP3**: [issue #58](https://github.com/LorenzoGalaverna/ingsoft3-ucc-2026/issues/58) — *"perf: GET /api/habits p95 ~1s en frío — mitigar cold start"*. Abierta a partir del dato de Sentry, con 4 opciones de mitigación ordenadas por costo. Es la fase MONITOR del ciclo DevOps alimentando el próximo PLAN — exactamente el continuous feedback de la clase 1.
+
+## 2 findings de CodeQL analizados (práctica recomendada §3.3)
+
+Después del `Set up → Default`, CodeQL encontró **4 findings** en `.github/workflows/ci.yml` — todos del mismo tipo:
+
+- **`actions/missing-workflow-permissions`** — "Workflow does not contain permissions"
+- Severidad: **warning**
+- Categoría OWASP: cae en [A5:2021 – Security Misconfiguration](https://owasp.org/Top10/A05_2021-Security_Misconfiguration/) — permisos excesivos del GITHUB_TOKEN que puede explotarse si una action de un third-party es comprometida.
+
+Finding 1 analizado — `ci.yml:183` (job `deploy-qa`):
+- **Qué detectó**: el job no declara `permissions:`, entonces hereda los default del repo. En un repo público nuevo son solo read, pero si alguien los cambia (o si el repo pasa a una org con otros defaults), el GITHUB_TOKEN del job pasa a tener permisos que no necesita.
+- **¿Explotable en MI app?**: muy bajo. Mi repo es personal, los jobs `deploy-qa`/`deploy-prod` sólo hacen `curl` a los hooks de Render — no usan el GITHUB_TOKEN para nada. El worst-case es cero.
+- **Decisión**: lo documento acá y lo arreglo en un commit chico después del cierre del TP9 — agregar `permissions: contents: read` a los 4 jobs sin permissions explícito (`deploy-qa`, `deploy-prod`, `integracion`, `e2e`). Fix de una línea por job, bajísimo riesgo. Ya está anotado para el próximo ciclo.
+
+Finding 2 — mismo tipo en `ci.yml:243` (job `deploy-prod`), `ci.yml:276` (`integracion`), `ci.yml:316` (`e2e`). Análisis idéntico. Son el mismo problema repetido 4 veces por configuración.
+
+**Lo que aprendí de hacer el análisis**: CodeQL dice "está esto", pero decidir si es explotable es MI trabajo. En este caso la decisión fue "válido pero bajo riesgo en mi contexto". En un repo con muchos contributors o actions de terceros, el mismo finding sería prioridad alta.
+
+## Problemas encontrados
+
+### a) Trap del Manual Deploy de Render — otra vez
+
+Al setear `SENTRY_DSN` en Render del `miapp-api-prod`, le di sin querer a **Save and deploy** en vez de **Save only**. Resultado: Render disparó un deploy manual usando la imagen que figura en *Settings → Image* (que es `sha-627549a...`, el placeholder del TP7 §3.2), y **PROD retrocedió** del commit del v7.0.0 (`sha-c37076d`) a `sha-627549a`.
+
+**Impacto real**: cero — entre esos dos commits sólo hay cambios de docs + el fix del botón "Crear hábito", y la app visible no cambia. Y el `SENTRY_DSN` estaba seteado pero el código del `sha-627549a` no lo usa (Sentry llega recién con el merge del PR #44).
+
+**Cómo lo recuperé**: no hice rollback manual. El próximo deploy del pipeline (merge del PR #44) iba a usar `imgURL=sha-<nuevo commit>` igual, y bajar la imagen correcta con Sentry activo. Fue así. La trampa está documentada desde el §9 del TP7 — es la segunda vez que pasa, y la lección sigue siendo: **el único deploy legítimo sale del pipeline, nunca de la UI**.
+
+### b) Dependabot: "can't be rebased"
+
+Al pedir `@dependabot rebase` en el PR #41 (que estaba `BEHIND` después de mergear el PR #40 del `dependabot.yml`), Dependabot respondió: *"The dependabot.yml entry that created this PR has been deleted so this PR can't be rebased"*.
+
+**Causa**: el PR #41 lo había abierto el escaneo inicial de GitHub ANTES de que mi `dependabot.yml` llegara a main. Para Dependabot, al mergear el yml "era una entrada nueva" que no coincidía con la que originó el PR → considera que la entrada del PR fue borrada.
+
+**Fix**: `gh api -X PUT /repos/.../pulls/41/update-branch` — fuerza el merge/rebase automático de GitHub sin pasar por Dependabot. CI corrió de nuevo sobre el nuevo HEAD, pasó verde, mergeé.
+
+### c) 15 PRs de Dependabot al mismo tiempo
+
+Al activar las flags de Security en Settings, se dispararon simultáneamente los PRs del scan semanal + los security on-demand. Me quedaron 15 PRs abiertos al mismo tiempo. **Mergeé sólo uno** (el critical de proxy-addr); los otros son `express 4→5`, `prisma 5→7`, `react 18→19`, `vite 6→8` (todos **majors** con breaking changes) y bumps menores de dev deps. Los dejo abiertos como backlog real — se mergean con tiempo, uno por uno, con análisis de changelog. La disciplina correcta es NO mergear 15 bumps mayores a ciegas aunque el CI esté verde; "verde" vale para patches, no para majors.
+
+## Declaración de uso de IA
+
+Mismo esquema que TP1-TP8: asistente de IA (Claude Opus 4.7 en Claude Code) con supervisión activa.
+
+**Novedad del TP9**: usamos el **plugin oficial de Sentry para Claude Code** (recién lanzado) que agrega un MCP de Sentry al editor. Con eso, en vez de pedirle al usuario que creara los 2 proyectos a mano en la UI de Sentry + copiara los DSNs, mi asistente llamó al MCP directo y creó los 2 proyectos + obtuvo los DSNs desde el chat. Instalación: `npx @sentry/agent-plugin install innexio-zd#<run_code>` + reinicio de Claude Code + OAuth a Sentry.
+
+Lo que decidí yo: la elección del plugin (vs camino manual), autorizar los scopes OAuth de Sentry (`org:read`, `project:write`, `team:write`, `event:write`, `alerts:write`), la plataforma de cada proyecto (`node-express` + `javascript-react`), qué endpoint temporal agregar para generar errores (`GET /api/falla` con throw), qué finding de CodeQL analizar y por qué considero bajo el impacto, qué PR de Dependabot mergear y qué dejar abierto, qué dato de Sentry llevar a la tarjeta del Project (p95 del endpoint más usado = mayor impacto en UX), y la decisión del tag `v9.0.0` sobre el commit que efectivamente está en PROD.
+
+Lo que ejecutó el asistente: la escritura de `.github/dependabot.yml`, la instrumentación de Sentry en `backend/src/instrument.js` + `backend/src/index.js` + `frontend/src/main.jsx` (con el DSN del front hardcoded porque no es secret — §3.5), la creación del issue #58 en el Project del TP3, los comandos `gh` + `curl` para generar tráfico/errores en PROD, los `gh api` para el update-branch y los auto-reject de los deploys de PRs documentales, y la redacción inicial de esta sección (revisada antes del commit).
+
+**La defensa oral no se delega**. En vivo con 3 pantallas abiertas (repo, UptimeRobot, Sentry):
+- *Security* del repo: Dependabot alerts, CodeQL (los 4 findings + mi análisis en voz alta), push protection activa.
+- PR #41 mergeado (Dependabot) con pipeline verde.
+- UptimeRobot con el DOWN/UP en el historial — número exacto arriba.
+- Sentry Issues (HABIT-TRACKER-BACKEND-1) + Dashboards (p95 por endpoint).
+- Issue #58 abierta en el Project del TP3 — el dato de Sentry que ya decidió el próximo PLAN.
+
+Puedo contestar las 11 preguntas del §Defensa Oral — incluyendo las tres más críticas:
+
+- **"¿Qué pasa cuando alguien intenta pushear un secreto?"** → Push protection lo bloquea con `GH013: Push cannot contain secrets`. El commit nunca llega al repo. Qué NO detecta: patrones que el escáner no conoce (passwords inventados, formatos custom) — para eso siguen las capas anteriores del arco (TP2 `.env` gitignoreado, TP4 secrets cifrados, TP6 environment secrets).
+- **"Tu monitor dice que estás viva. ¿Qué te dice Sentry que el monitor no?"** → El monitor pregunta "¿respondés?" y nada más. Sentry mide errores, latencias, usuarios afectados, uso real. Un `/health` puede dar 200 mientras `/api/habits` da 500 — el monitor dice OK, Sentry dice "crashea". Es la diferencia entre "estar vivo" y "funcionar".
+- **"Si algo se rompe en producción, ¿qué pregunta se hace un equipo en vez de 'quién fue'?"** → "¿Qué hizo posible que este error llegara a producción?" Blameless: a la persona la podés reemplazar, al sistema no — si el sistema deja pasar el error, lo va a dejar pasar la próxima vez con otra persona. Las acciones del postmortem son cambios al sistema (gates, alertas, protecciones), no promesas de "tener más cuidado".
+
