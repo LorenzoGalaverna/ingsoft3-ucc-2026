@@ -1,4 +1,9 @@
+// TP9 §3.5 — DEBE ser el primer import: Sentry.init() antes de cargar express
+// para que la instrumentación automática pueda interceptar los módulos.
+import './instrument.js';
+
 import express from 'express';
+import * as Sentry from '@sentry/node';
 import cors from 'cors';
 import { PrismaClient } from '@prisma/client';
 import { calcularNivel, XP_PER_LEVEL } from './domain/leveling.js';
@@ -88,6 +93,17 @@ app.post('/api/habits/:id/complete', async (req, res) => {
     throw err;
   }
 });
+
+// TP9 §3.5 — Endpoint TEMPORAL para provocar un error y verlo llegar a Sentry
+// (Issues). SACAR cuando se cierre el práctico — no debe quedar en PROD.
+app.get('/api/falla', () => {
+  throw new Error('Falla de prueba del TP9');
+});
+
+// TP9 §3.5 — Error handler de Sentry. Captura las excepciones no manejadas
+// (como el throw de /api/falla) y las manda a Issues. Va DESPUÉS de todas
+// las rutas y ANTES de app.listen().
+Sentry.setupExpressErrorHandler(app);
 
 // Solo escuchamos si el módulo se ejecuta directo (no cuando lo importa un test).
 if (import.meta.url === `file://${process.argv[1]}`) {
