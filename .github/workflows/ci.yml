@@ -68,7 +68,7 @@ jobs:
 
       - name: Publicar reporte HTML descargable
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-backend
           path: coverage-backend/
@@ -148,7 +148,7 @@ jobs:
 
       - name: Publicar reporte HTML descargable
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-frontend
           path: coverage-frontend/
@@ -259,7 +259,7 @@ jobs:
         run: npx playwright test e2e/api.spec.js --reporter=html
       - name: Publicar reporte de integración
         if: always()   # también sube el reporte cuando los tests fallan
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report-integracion
           path: frontend/playwright-report/
@@ -293,7 +293,7 @@ jobs:
         run: npx playwright test e2e/habitos.spec.js --reporter=html
       - name: Publicar reporte de e2e
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report-e2e   # 🔴 nombre DISTINTO del de integración
           path: frontend/playwright-report/
