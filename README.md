@@ -17,13 +17,21 @@ App del semestre de **Ingeniería del Software 3** (UCC, cátedra Ing. Ariel Sch
 │   └── Dockerfile              # multi-stage build → runtime
 ├── frontend/                   # React + Vite
 │   ├── src/App.jsx
-│   ├── nginx.conf              # sirve estáticos + proxy /api → backend
-│   └── Dockerfile              # multi-stage build → nginx
+│   ├── e2e/                    # Playwright: api.spec.js (integración) + habitos.spec.js (e2e) — TP7
+│   ├── default.conf.template   # plantilla nginx (envsubst de ${BACKEND_URL}) — TP6
+│   └── Dockerfile              # multi-stage build → tests → nginx
+├── infra/                      # Terraform para preprod (TP8) — Neon + Render
+│   ├── main.tf
+│   ├── variables.tf
+│   └── outputs.tf
 ├── docker-compose.yml          # levanta el sistema completo desde el código
-├── docker-compose.registry.yml # ídem, pero baja las imágenes de ghcr.io
+├── docker-compose.registry.yml # legacy del TP2: imágenes `habit-tracker-*:v0.1.1`
+├── .github/
+│   ├── workflows/ci.yml        # pipeline: build + test + publish + deploy — TP4..TP7
+│   └── dependabot.yml          # updates semanales + security on-demand — TP9
 ├── .env.example                # plantilla — copiar a .env antes del primer up
-├── decisiones.md               # historial acumulativo TP a TP
-└── evidencias.md               # ídem — capturas de cada TP
+├── decisiones.md               # historial acumulativo TP a TP (es LA pieza de defensa)
+└── evidencias.md               # capturas (solo TP1 y TP2; desde TP3 todo se navega el repo público)
 ```
 
 ## Arranque desde cero (dos comandos)
@@ -105,10 +113,22 @@ npm run dev                # http://localhost:5173 (proxea /api al backend)
 
 Convención unificada de la cátedra (aviso del 25/8/2026): cada práctico se cierra con `vN.0.0` + release. Los tags `tpN` de la política vieja (§3 del reglamento) quedan por continuidad — un commit puede tener varios tags.
 
+### Bloque P1 (TPs 1-4)
+
 - `tp1` / `v1.0.0` — cierre del **TP1** (Git colaborativo).
 - `tp2` / `v2.0.0` — cierre del **TP2** (contenedores). *(Legacy: `v1.1.0` apunta al mismo commit.)*
 - `tp3` / `v3.0.0` — cierre del **TP3** (planificación DevOps + [Project público](https://github.com/users/LorenzoGalaverna/projects/1)). *(Legacy: `v1.2.0` apunta al mismo commit.)*
-- `v4.0.0` — cierre del **TP4** (CI Pipelines as Code).
+- `v4.0.0` — cierre del **TP4** (CI Pipelines as Code — pipeline con cache por scope y gate `strict:true`).
+
+### Bloque P2 (TPs 5-9)
+
+- `v5.0.0` — cierre del **TP5** (testing en el pipeline — vitest, cobertura ≥70 % líneas Y branches como gate).
+- `v6.0.0` — cierre del **TP6** (CD con environments + aprobación — QA automático, PROD con required reviewer; rollback cronometrado en 41 s).
+- `v7.0.0` — cierre del **TP7** (build once / deploy many — Render *image-backed* con `imgURL`; suites de integración + e2e con Playwright; gate rojo frenando promoción).
+- `v8.0.0` — cierre del **TP8** (IaC con Terraform — carpeta [`infra/`](infra/) declara un entorno `preprod` que nace y muere con un comando).
+- `v9.0.0` — cierre del **TP9** (DevSecOps + observabilidad — Dependabot + CodeQL + push protection, UptimeRobot sobre `/health`, Sentry en back y front con un dato llevado a tarjeta en el Project).
+
+Las imágenes de `vN.0.0` se publican en [ghcr.io](https://github.com/LorenzoGalaverna?tab=packages) etiquetadas con el commit (`sha-<commit>`): del tag al binario en un paso con `git rev-list -n1 vN.0.0`.
 
 ## Uso de IA
 
