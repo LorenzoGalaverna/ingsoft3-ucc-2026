@@ -1529,3 +1529,88 @@ Puedo contestar las 11 preguntas del §Defensa Oral — incluyendo las tres más
 - **"Tu monitor dice que estás viva. ¿Qué te dice Sentry que el monitor no?"** → El monitor pregunta "¿respondés?" y nada más. Sentry mide errores, latencias, usuarios afectados, uso real. Un `/health` puede dar 200 mientras `/api/habits` da 500 — el monitor dice OK, Sentry dice "crashea". Es la diferencia entre "estar vivo" y "funcionar".
 - **"Si algo se rompe en producción, ¿qué pregunta se hace un equipo en vez de 'quién fue'?"** → "¿Qué hizo posible que este error llegara a producción?" Blameless: a la persona la podés reemplazar, al sistema no — si el sistema deja pasar el error, lo va a dejar pasar la próxima vez con otra persona. Las acciones del postmortem son cambios al sistema (gates, alertas, protecciones), no promesas de "tener más cuidado".
 
+---
+
+# Cierre del Integrador — vista de la cadena completa
+
+Esta sección es específica del TP10 (Integrador — defensa del final). Resume la cadena entera de un solo vistazo, lista las tres decisiones de diseño que más defendería hoy, y lo que haría distinto si arrancara otra vez el semestre.
+
+## Diagrama de la cadena completa
+
+```
+                          ┌─────────────────────────────────────┐
+                          │  CODE   commit → PR → main          │  ◄── branch protegida
+                          └─────────────────────────────────────┘
+                                          │
+                        ┌─────────────────┴─────────────────┐
+                        ▼                                   ▼
+                 build-backend                       build-frontend
+                 └── stage test (vitest)             └── stage test (vitest)
+                     └── gate 70% lines + 70% branches → sin verde no hay imagen
+                        │                                   │
+                        ▼                                   ▼
+                 ghcr.io/…backend:sha-<commit>      ghcr.io/…frontend:sha-<commit>
+                        │                                   │
+                        └─────────────────┬─────────────────┘
+                                          ▼
+                                 deploy-qa (auto) ──────► Render QA (image-backed)
+                                 smoke QA (3 capas)                   │
+                                          │                            ▼
+                                          ▼                     Neon habit-tracker (db)
+                                 integración (Playwright → API QA)
+                                          │
+                                          ▼
+                                 e2e (Playwright + Chromium → front QA)
+                                          │
+                                          ▼
+                                  [⏸ gate humano — required reviewer]
+                                          │
+                                          ▼
+                                 deploy-prod (misma imagen) ─────► Render PROD
+                                 smoke PROD (3 capas)                     │
+                                                                          ▼
+                                                                   Neon habit-tracker (db)
+
+  INFRA (TP8)     infra/ (Terraform)  →  preprod on-demand (apply ~20s · destroy ~8s)
+
+  DEVSEC (TP9)    Push Protection (pre-commit) · CodeQL (por PR) · Dependabot (continuo)
+
+  OBSERV. (TP9)   Sentry (errores + p95) · UptimeRobot (/health externo, pausado off-defense)
+
+  FEEDBACK        Sentry/UR → tarjeta #58 en el Project del TP3 → próximo PR
+```
+
+## Las 3 decisiones de diseño que más defiendo
+
+### 1. Image-backed con `sha-<commit>` inmutable (TP7)
+
+El pipeline buildea la imagen **una sola vez** en `build-backend`/`build-frontend`, la publica en ghcr con tag `sha-<commit>`, y ese mismo SHA viaja por 4 puntos del workflow (los dos `build` + los dos `deploy`) hasta que PROD recibe exactamente la imagen que QA verificó. El `${{ github.sha }}` queda congelado al arrancar el run — aunque entren otros merges mientras `deploy-prod` espera aprobación, lo que sube a PROD es lo que aprobé, no "lo último de main".
+
+**Lo que resolvió**: el gap del TP6 con `ref=main` en el hook — un puntero móvil donde entre "waiting-for-review" y el approve podían pasar horas y PROD terminaba desplegando otro commit. **La garantía deja de ser "aprobé un commit y espero lo mismo" y pasa a ser "aprobé una imagen con digest conocido y es LITERALMENTE lo que corre"**. Es la misma clase de pin que `package-lock.json` para npm o `version = "0.18.0"` en Terraform: identificador inmutable contra puntero móvil.
+
+### 2. IaC con Terraform + destroy disciplinado (TP8)
+
+`infra/` declara un entorno completo (`preprod`) en 3 archivos: 1 project Neon + 1 role + 1 database + 2 servicios Render image-backed. Nace con `terraform apply` en ~20 s, muere con `terraform destroy` en ~8 s. El estado se verifica con un ciclo apply/destroy/apply antes de cada defensa.
+
+**Lo que defiendo acá**: la disciplina del destroy no es pereza, es economía — 750 hs/mes del workspace de Render compartidas entre QA + PROD + preprod; 6 servicios despiertos todo el mes se pasan de cuota y Render suspende PROD. **La regla "existe cuando se lo necesita, se va cuando no" sale del constraint real, no del dogma**. Lección cruzada: Terraform solo vigila lo que declaré. Mis QA y PROD (clickeados en TP6) son invisibles para `infra/` — un `plan` limpio significa "lo que yo gobierno está como pedí", no "nada raro en mi cuenta".
+
+### 3. Smoke tests multi-capa (TP6)
+
+El smoke no es `curl /health && exit 0`. Son **3 curls encadenados** que verifican 3 capas distintas: `/health` (proceso Node vivo), `/api/habits` (Prisma conecta a Neon y responde), `/` del front (nginx sirve `dist/`). Cualquiera que falle, el smoke retorna rojo.
+
+**Lo que defiendo acá**: honesta el problema clásico que atrapa a los smokes "ingenuos" — un `/health` que devuelve 200 con la BD colgada pasa inadvertido, porque Express sigue vivo. **Las 3 capas aseguran que el SERVICIO funciona, no solo que el PROCESO arrancó**. Es un ejemplo pedagógico de un assert que cae antes que la métrica obvia (uptime) pero es el que más atrapa — lo mismo que `branches` atrapa cosas que `lines` ignora en cobertura.
+
+## Qué haría distinto si empezara de nuevo
+
+### 1. Endpoint `/version` + smoke que verifique SHA
+
+**Gap honesto del TP7**: el smoke actual verifica que los servicios respondan, no QUÉ versión respondió. Con image-backed y swap atómico de Render la ventana de riesgo es chica, pero no cero. El fix completo sería un endpoint `/version` que devuelva el SHA del commit (inyectado en build-time por env var del Dockerfile) y un smoke que compare con el SHA esperado. Si Render demora el switch del contenedor, el smoke lo cazaría; hoy no. Lo documenté en el TP7 como "ganancia restante", y dejarlo fue decisión consciente, no olvido.
+
+### 2. Remote state de Terraform
+
+`terraform.tfstate` vive en mi máquina, gitignored. Si lo pierdo, Terraform cree que no existe nada y el próximo `apply` entra en conflicto con lo real en Neon/Render. El backup (`.tfstate.backup`) es red de **un nivel** — no historial. Un remote state (S3 con versioning, Terraform Cloud, Spacelift) agrega 3 cosas que acá no tengo: historial real, locking automático (impide dos `apply` en paralelo), y resiliencia a la pérdida de la máquina. Para 1 dev + 1 máquina el riesgo es bajo; para un equipo, es default.
+
+### 3. Cerrar los 4 findings de CodeQL
+
+CodeQL detectó 4 findings en `.github/workflows/ci.yml`, todos del mismo tipo: `actions/missing-workflow-permissions` en `deploy-qa`, `deploy-prod`, `integracion` y `e2e`. El análisis del TP9 fue consciente — repo personal, los jobs no usan `GITHUB_TOKEN` para operaciones riesgosas, impacto bajo — pero el fix es trivial: una línea `permissions: contents: read` por job. **Dejar un finding con decisión documentada es mejor que ignorarlo; cerrarlo con el fix de 4 líneas sería lo más higiénico**. Es la única deuda técnica declarada que me queda pendiente del P2.
+
